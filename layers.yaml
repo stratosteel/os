@@ -1,0 +1,55 @@
+# Stratosteel OS manifest: which provider fills each layer of the AI-operated company.
+# Template values. A company instance copies this file to <company>.instance.yaml and changes
+# providers and names only; it never changes the layer set or the gate semantics.
+# Canon: stratosteel/stratosteel/02_PROGRAMS/P1_BACKBONE/STRATOSTEEL_OS_ARCHITECTURE.md (sections 3, 4, 11).
+schema: stratosteel-os/layers/v0.1
+
+company:
+  id: template
+  name: Template Company
+  timezone: Europe/Bratislava
+  languages: [en]
+
+layers:
+  L1_tenant:
+    purpose: identity, mail, files, chat for people and workers
+    provider: none            # m365 | google | none
+    options: [m365, google]
+    acceptance: [T1, T2, T3, T4, T5, T6, T7, T8, T9]   # defined in the instance plan, not here
+    status: planned
+  L2_records:
+    purpose: system of record for inquiries, quotes, orders, documents (DOP -> RFQ_OUT -> CN -> PO)
+    provider: none            # fabrix | odoo | none
+    options: [fabrix, odoo]
+    status: planned
+  L3_runtime:
+    purpose: where AI workers run with permissions, schedules and budgets
+    provider: none            # managed-agents | forge | none
+    options: [managed-agents, forge]
+    budget_usd_cap: 150
+    status: planned
+  L4_memory:
+    purpose: durable canon, decisions, append-only handover ledger
+    provider: github
+    repo: org/repo
+    ledger_path: 02_PROGRAMS/HANDOVER_LEDGER.md
+    state_page: STATE_OF_THE_BUILD.md
+    status: planned
+  L5_access:
+    purpose: one door for every AI (chat assistants, coding agents, workers) to mail, files, records, memory
+    provider: mcp
+    server: "@stratosteel/os (src/server.ts)"
+    transport: stdio
+    status: skeleton
+  L6_gates:
+    purpose: what AI may do alone, what a person approves, what is forbidden
+    policy: policy/default    # src/policy.ts defaults; the instance overrides in its yaml
+    status: coded
+
+gates:                         # MVP gates, measured in the memory repo's state page
+  G1: { name: layer 1 live, acceptance T1-T9 pass, status: open }
+  G2: { name: first thin slice A03 without new code, status: open }
+  G3: { name: first worker supplier inquiry with send record (A05, A09, A11), status: open }
+  G4: { name: two automatic handover cycles without the owner, status: open }
+  G5: { name: one full steel-structure flow inquiry to order inside the system, status: open }
+  G6: { name: template installed into an empty second instance by configuration only, status: open }

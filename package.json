@@ -1,0 +1,26 @@
+{
+  "name": "@stratosteel/os",
+  "version": "0.1.0",
+  "description": "Stratosteel OS: template of an AI-operated company in six layers (tenant, records, worker runtime, memory, access door, human gates). Policy as code, MCP access server with provider interfaces, append-only ledger and approval queue.",
+  "private": true,
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "engines": { "node": ">=20" },
+  "bin": { "stratosteel-os-mcp": "dist/src/index.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
+    "lint:manifest": "node dist/src/manifest.js layers.yaml",
+    "start": "node dist/src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
+    "js-yaml": "^4.1.0",
+    "zod": "^4.2.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}
