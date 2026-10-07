@@ -1,5 +1,38 @@
 # Stratosteel OS
 
+**A template for a company operated by AI workers under human gates. Built in the open by a 3-person heavy-industry supplier in Slovakia, for itself first.**
+
+## Why this exists
+
+We have not found a vendor that sells "a company operated by AI" as a whole; what exists are commodity layers (identity, mail, files), systems of record, agent runtimes and orchestration products (for example UiPath Maestro or ServiceNow AI agents), and glue. That absence is our working hypothesis, not a verified market fact, and we compare against those products rather than ignore them. The quality, we think, lives in the composition. We are a small industrial company (castings to 30 t, forgings, machining, steel structures for OEMs) and we are composing it for ourselves as six layers, publishing the composition so that a second company can be installed by configuration, not by rewriting:
+
+1. **Tenant**: identity, mail, calendar, files for people and AI workers.
+2. **Records**: one system of record for inquiry, supplier RFQ, quote, order.
+3. **Worker runtime**: where AI workers run, with permissions, schedules and budgets.
+4. **Memory**: one durable canon (rules, decisions, ledger, state) in a git repository that every AI and every person reads.
+5. **Access**: one MCP door through which every model (Claude, Codex, ChatGPT, others) reaches mail, files, records and memory under the same policy.
+6. **Human gates**: what AI may do alone, what a person approves, what is forbidden, as code with tests.
+
+The operating rule behind it, from the owner: AI workers run operations; people approve templates and numbers, nothing else.
+
+## What is proven and what is not (measured state in [STATUS.md](STATUS.md))
+
+- Proven: the skeleton runs locally with mock providers; policy as code, approval queue and append-only ledger pass their tests; one MCP server exposes the same tools to every model.
+- Not proven: 0 of 6 MVP gates passed. The first measured number, human hours per qualified conversation, closes on 19 October 2026 and will be published either way. No claim is made that this saves money or time until the numbers say so.
+- Research sibling (separate, private repository): XS Lab, a preregistered, independently audited experiment on execution compression. Its narrowest audited claim is quoted in STATUS.md with every disclosure.
+
+## What we ask from you
+
+Where does this design break for your company? Open an issue with the layer number and the failure you expect. Critique is worth more to us than praise. If you run a small industrial company and want to be the second instance, say so in an issue or by email (address in [SECURITY.md](SECURITY.md)).
+
+## Licence
+
+Source-available under a proprietary licence (see [LICENSE](LICENSE)): read, run and critique freely; copying it into another company is done with us, under a written agreement. A licence model for other companies is an open owner decision.
+
+---
+
+## Original README (template detail)
+
 Template of a company operated by AI workers under human gates, in six layers. Built by Stratosteel s.r.o. for itself first (the MVP), designed from day one so that a second company installs it by configuration, not by rewriting. Direction and canon live in the private knowledge repository `stratosteel/stratosteel` (`00_CORE/STRATOSPHERE_GLOBAL_THESIS.md`, `02_PROGRAMS/P1_BACKBONE/STRATOSTEEL_OS_ARCHITECTURE.md`, `STATE_OF_THE_BUILD.md`). This repository is the code and the template; it carries no company secrets, no customer or partner names and no credentials.
 
 Status 2026-10-06: v0.1.0, skeleton. 11 MCP tools over mock providers, policy as code, append-only ledger and approval queue, manifest validator, 21 tests passing, stdio server verified with an MCP client handshake. No real tenant, record system or runtime is wired yet (that is what the gates below measure).
