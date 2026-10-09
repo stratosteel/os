@@ -1,10 +1,10 @@
 # Stratosteel OS
 
-**A template for a company operated by AI workers under human gates. Built in the open by a 3-person heavy-industry supplier in Slovakia, for itself first.**
+**A template for a company operated by AI workers under human gates. Built in the open by a heavy-industry supplier in Slovakia, for itself first.**
 
 ## Why this exists
 
-We have not found a vendor that sells "a company operated by AI" as a whole; what exists are commodity layers (identity, mail, files), systems of record, agent runtimes and orchestration products (for example UiPath Maestro or ServiceNow AI agents), and glue. That absence is our working hypothesis, not a verified market fact, and we compare against those products rather than ignore them. The quality, we think, lives in the composition. We are a small industrial company (castings to 30 t, forgings, machining, steel structures for OEMs) and we are composing it for ourselves as six layers, publishing the composition so that a second company can be installed by configuration, not by rewriting:
+We have not found a vendor that sells "a company operated by AI" as a whole; what exists are commodity layers (identity, mail, files), systems of record, agent runtimes and orchestration products (for example UiPath Maestro or ServiceNow AI agents), and glue. That absence is our working hypothesis, not a verified market fact, and we compare against those products rather than ignore them. The quality, we think, lives in the composition. We are an industrial company in Slovakia (heavy machined parts, castings, forgings, weldments and steel structures for OEMs) and we are composing it for ourselves as six layers, publishing the composition so that a second company can be installed by configuration, not by rewriting:
 
 1. **Tenant**: identity, mail, calendar, files for people and AI workers.
 2. **Records**: one system of record for inquiry, supplier RFQ, quote, order.
