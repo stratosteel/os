@@ -13,7 +13,7 @@ Options: Microsoft 365 Business (Exchange, SharePoint, OneDrive, Entra, Teams); 
 
 Purpose: one chain per job: inquiry DOP -> supplier requests RFQ_OUT -> quote CN -> order PO, with documents, revisions, approvals and the sourcing plan ("where to order what" decided at quoting, executed at order). No second truth in mail folders or chat.
 Interface: `RecordsProvider` (`getJob`, `listJobs`); later `createChild`, `setSourcingPlan`, `recordDecision`.
-Acceptance: A01-A15 of the functional specification (ASTRA), in particular A03 (exact retrieval), A05 (revision-bound release), A09 (send record), A11 (ambiguous result reconciliation).
+Acceptance: A01-A15 of the functional specification (ASTRA), in particular A03 (exact retrieval), A05 (two workers, one intended send), A09 (timeout, restart and reconciliation before any retry), A11 (a changed drawing invalidates the approval).
 Options: FABRIX (Stratosteel's own, live with document chain and audit); Odoo as the OPPOSITE test. Stratosteel choice: FABRIX, Odoo tested against it.
 
 ## L3 runtime: where workers run

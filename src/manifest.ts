@@ -53,15 +53,29 @@ export async function loadManifest(path: string): Promise<Manifest> {
   return parseManifest(await readFile(path, 'utf8'));
 }
 
-/** Gate order is fixed: a later gate cannot pass while an earlier one is open or failed. */
+type GateId = keyof Manifest['gates'];
+
+/**
+ * Gate dependencies, as in the Depends on column of ROADMAP.md. Gates are not passed in number order: G4, the
+ * metadata-only bus proof, does not wait for G3; G5 depends on G3 and G6 on G5.
+ */
+export const GATE_DEPENDENCIES: Readonly<Record<GateId, readonly GateId[]>> = {
+  G1: [],
+  G2: ['G1'],
+  G3: ['G1'],
+  G4: [],
+  G5: ['G3'],
+  G6: ['G5'],
+};
+
+/** A gate cannot pass while a gate it depends on is open or failed. This checks recorded statuses, not evidence. */
 export function gateOrderErrors(m: Manifest): string[] {
-  const order = ['G1', 'G2', 'G3', 'G4', 'G5', 'G6'] as const;
   const errors: string[] = [];
-  let blocked = false;
-  for (const g of order) {
-    const st = m.gates[g].status;
-    if (blocked && st === 'passed') errors.push(`${g} passed while an earlier gate is not passed`);
-    if (st !== 'passed') blocked = true;
+  for (const [gate, deps] of Object.entries(GATE_DEPENDENCIES) as [GateId, readonly GateId[]][]) {
+    if (m.gates[gate].status !== 'passed') continue;
+    for (const dep of deps) {
+      if (m.gates[dep].status !== 'passed') errors.push(`${gate} passed while ${dep}, a gate it depends on, is not passed`);
+    }
   }
   return errors;
 }
