@@ -26,3 +26,4 @@ In a controlled synthetic document-routing environment with a fixed primitive ca
 ## Change log of this page
 - 2026-10-07: first public version.
 - 2026-10-10: branch fix/astra-review-2026-10-07 (pull request to main) closes review findings OS-POL-01, OS-POL-02, OS-POL-03, OS-APP-01 and G3-MAP of 2026-10-07 in code and tests; no gate passed, G3 stays open.
+- 2026-10-10: branch feat/g4-github-ledger-bus (pull request to fix/astra-review-2026-10-07) adds the GitHub memory provider (tested against a local fake API) and the bus adapter with the 5-point activation gate as tests against a local bare git remote (independent processes, evidence persisted); local and mock semantics only, 0 automatic handover cycles in production; no gate passed, G4 stays open.
