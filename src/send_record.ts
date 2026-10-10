@@ -87,6 +87,8 @@ export const DEFAULT_SEND_LIMITS: SendLimits = { maxAttempts: 3, maxReconcileQue
 
 export interface SendIntentInput {
   key: SendIntentKey;
+  /** Job (inquiry record) the package belongs to: bound by approvals and used by scoped reads; not part of the key. */
+  jobId?: string;
   message: RenderedMessage;
   templateId: string;
   templateVersion: string;
@@ -102,6 +104,7 @@ export interface SendIntent {
   schema: 'stratosteel-os/send-intent/v1';
   intentId: string;
   key: SendIntentKey;
+  jobId?: string;
   /** Carried in the outgoing message so the provider's Sent evidence can be matched after a restart. */
   correlationId: string;
   /** The same on every attempt; it deduplicates only on a transport whose deduplication is proven. */
@@ -128,11 +131,22 @@ export type SendEventBody =
   | { type: 'claimed'; fence: number; leaseUntil: string }
   | { type: 'renewed'; fence: number; leaseUntil: string }
   | { type: 'released'; fence: number }
-  | { type: 'submit_started'; fence: number; attempt: number; contentHash: string; idempotencyKey: string; dedupProof?: string }
+  | {
+      type: 'submit_started'; fence: number; attempt: number; contentHash: string; idempotencyKey: string; dedupProof?: string;
+      /** Approval binding verified at the dispatch boundary (A11), the registry version of that check and the exact bytes. */
+      bindingHash?: string; registrySeq?: number; attachmentBytes?: { documentId: string; revision: string; sha256: string }[];
+    }
   | { type: 'submit_result'; fence: number; attempt: number; outcome: SubmitOutcome; status?: number; transportMessageId?: string; deduplicated?: boolean; error?: string }
   | { type: 'reconcile_query'; fence: number; query: number; found: SentEvidence[]; error?: string }
   | { type: 'escalated'; fence: number; reason: string; approvalId?: string }
   | { type: 'dispatch_blocked'; fence: number; reasons: string[] }
+  /** A stale or missing approval at the dispatch boundary: a new approval request for the current trusted state (A11). */
+  | { type: 'approval_requested'; fence: number; approvalId: string; bindingHash: string; reasons: string[] }
+  /** A bound document changed after the dispatch fence: the sent snapshot stays, the record is marked, a person decides. */
+  | {
+      type: 'superseded'; documentId: string; sentRevision: string; currentRevision: string; sentSha256: string; currentSha256: string;
+      dispatchSeq: number; changeSeq: number; approvalId?: string;
+    }
   | { type: 'duplicate_suppressed'; task: string; contentHash: string; sameContent: boolean }
   | { type: 'stale_rejected'; fence: number; attempted: string; reason: string };
 
@@ -153,6 +167,9 @@ export interface AttemptView {
   pid: number;
   startedAt: string;
   dedupProof?: string;
+  bindingHash?: string;
+  registrySeq?: number;
+  attachmentBytes?: { documentId: string; revision: string; sha256: string }[];
   result?: { outcome: SubmitOutcome; at: string; status?: number; transportMessageId?: string; deduplicated?: boolean; error?: string; late: boolean };
 }
 
@@ -177,6 +194,10 @@ export interface SendRecord {
   contentMismatch?: SentEvidence;
   escalations: { at: string; worker: string; reason: string; approvalId?: string }[];
   blocks: { at: string; worker: string; reasons: string[] }[];
+  /** New approval requests filed at the dispatch boundary; the last one is the approval in force (A11). */
+  approvalChain: { at: string; worker: string; approvalId: string; bindingHash: string; reasons: string[] }[];
+  /** Bound documents that changed after the dispatch fence. */
+  superseded: { at: string; documentId: string; sentRevision: string; currentRevision: string; sentSha256: string; currentSha256: string; dispatchSeq: number; changeSeq: number; approvalId?: string }[];
   suppressed: { at: string; worker: string; task: string; contentHash: string; sameContent: boolean }[];
   staleRejections: { at: string; worker: string; fence: number; attempted: string; reason: string }[];
   /** Why the intent cannot progress without a person, if it cannot. */
@@ -205,6 +226,8 @@ export function reduceSendRecord(intent: SendIntent, events: SendEvent[]): SendR
     reconcileQueries: 0,
     escalations: [],
     blocks: [],
+    approvalChain: [],
+    superseded: [],
     suppressed: [],
     staleRejections: [],
     events,
@@ -267,7 +290,13 @@ export function reduceSendRecord(intent: SendIntent, events: SendEvent[]): SendR
         if (ev.attempt !== rec.attempts.length + 1) return `attempt number ${ev.attempt} is not ${rec.attempts.length + 1}`;
         if (ev.contentHash !== intent.contentHash) return 'content hash differs from the immutable intent';
         if (ev.idempotencyKey !== intent.idempotencyKey) return 'idempotency key differs from the intent';
-        rec.attempts.push({ attempt: ev.attempt, fence: ev.fence, worker: ev.worker, pid: ev.pid, startedAt: ev.at, ...(ev.dedupProof ? { dedupProof: ev.dedupProof } : {}) });
+        rec.attempts.push({
+          attempt: ev.attempt, fence: ev.fence, worker: ev.worker, pid: ev.pid, startedAt: ev.at,
+          ...(ev.dedupProof ? { dedupProof: ev.dedupProof } : {}),
+          ...(ev.bindingHash ? { bindingHash: ev.bindingHash } : {}),
+          ...(ev.registrySeq !== undefined ? { registrySeq: ev.registrySeq } : {}),
+          ...(ev.attachmentBytes ? { attachmentBytes: ev.attachmentBytes } : {}),
+        });
         enter('queued', ev);
         return null;
       }
@@ -317,6 +346,21 @@ export function reduceSendRecord(intent: SendIntent, events: SendEvent[]): SendR
         rec.blocks.push({ at: ev.at, worker: ev.worker, reasons: ev.reasons });
         return null;
       }
+      case 'approval_requested': {
+        if (ev.fence !== rec.fence) return `stale fence ${ev.fence}: the current fence is ${rec.fence}`;
+        if (rec.state === 'accepted' || rec.state === 'observed_sent') return `already ${rec.state}: no new approval is requested`;
+        rec.approvalChain.push({ at: ev.at, worker: ev.worker, approvalId: ev.approvalId, bindingHash: ev.bindingHash, reasons: ev.reasons });
+        return null;
+      }
+      case 'superseded': {
+        if (!rec.attempts.length) return 'nothing was dispatched: a change before dispatch is a stale approval, not a supersession';
+        if (rec.superseded.some((x) => x.documentId === ev.documentId && x.changeSeq === ev.changeSeq)) return 'this change is already recorded';
+        rec.superseded.push({
+          at: ev.at, documentId: ev.documentId, sentRevision: ev.sentRevision, currentRevision: ev.currentRevision, sentSha256: ev.sentSha256,
+          currentSha256: ev.currentSha256, dispatchSeq: ev.dispatchSeq, changeSeq: ev.changeSeq, ...(ev.approvalId ? { approvalId: ev.approvalId } : {}),
+        });
+        return null;
+      }
       case 'duplicate_suppressed':
         rec.suppressed.push({ at: ev.at, worker: ev.worker, task: ev.task, contentHash: ev.contentHash, sameContent: ev.sameContent });
         return null;
@@ -341,6 +385,13 @@ export function reduceSendRecord(intent: SendIntent, events: SendEvent[]): SendR
   return rec;
 }
 
+/** The approval in force: the last one requested at the dispatch boundary, else the intent's own (none for a policy allow). */
+export function effectiveApprovalId(record: SendRecord): string | undefined {
+  const chain = record.approvalChain;
+  if (chain.length) return chain[chain.length - 1].approvalId;
+  return record.intent.authorization.kind === 'approval' ? record.intent.authorization.approvalId : undefined;
+}
+
 /** True while an attempt was started and neither its result nor Sent evidence resolves it. */
 export function hasUnresolvedAttempt(record: SendRecord): boolean {
   return !record.sentEvidence && record.attempts.some((a) => !a.result || a.result.outcome === 'unknown');
@@ -348,6 +399,13 @@ export function hasUnresolvedAttempt(record: SendRecord): boolean {
 
 /** A label a person can read. It never claims more than the evidence: no "sent" before Sent evidence, never "delivered". */
 export function describeSendState(record: SendRecord): string {
+  const base = describeState(record);
+  if (!record.superseded.length) return base;
+  const s = record.superseded.map((x) => `${x.documentId} revision ${x.sentRevision} was sent, revision ${x.currentRevision} is current`).join('; ');
+  return `${base}; superseded after dispatch (${s}): escalated to a person, nothing is resent`;
+}
+
+function describeState(record: SendRecord): string {
   switch (record.state) {
     case 'approved':
       return 'approved; not queued; nothing has been submitted';
@@ -370,6 +428,7 @@ export function sendRecordSnapshot(r: SendRecord) {
   return {
     intentId: r.intentId,
     key: i.key,
+    jobId: i.jobId ?? null,
     correlationId: i.correlationId,
     idempotencyKey: i.idempotencyKey,
     contentHash: i.contentHash,
@@ -383,6 +442,9 @@ export function sendRecordSnapshot(r: SendRecord) {
     templateVersion: i.templateVersion,
     policyVersion: i.policyVersion,
     approvalId: i.authorization.kind === 'approval' ? i.authorization.approvalId : null,
+    approvalInForce: effectiveApprovalId(r) ?? null,
+    approvalChain: r.approvalChain,
+    superseded: r.superseded,
     state: r.state,
     label: describeSendState(r),
     stateTimes: r.stateTimes,
@@ -505,6 +567,7 @@ export class SendRecordStore {
       idempotencyKey: `idem-${intentId.slice(3)}`,
       contentHash,
       message,
+      ...(filled(input.jobId) ? { jobId: input.jobId.trim() } : {}),
       templateId: input.templateId.trim(),
       templateVersion: input.templateVersion.trim(),
       policyVersion: input.policyVersion.trim(),

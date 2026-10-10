@@ -201,7 +201,7 @@ export async function writeEventFixture(ws: Workspace, event: { id: string; type
 export async function persistEvidence(
   t: TestContext,
   ws: Workspace,
-  args: { fixture?: unknown; intentIds?: string[]; trace?: Trace; summary?: Record<string, unknown> },
+  args: { fixture?: unknown; intentIds?: string[]; trace?: Trace; summary?: Record<string, unknown>; copies?: { from: string; name: string }[] },
 ): Promise<string> {
   const dir = ws.evidenceDir;
   const written: string[] = [];
@@ -234,6 +234,14 @@ export async function persistEvidence(
   await write('transport_sent_items.json', JSON.stringify({ count: sent.length, sent }, null, 2) + '\n');
   await write('transport_sent_queries.json', JSON.stringify({ count: queries.length, queries }, null, 2) + '\n');
   if (args.trace) await write('process_trace.txt', args.trace.lines.join('\n') + '\n');
+  for (const c of args.copies ?? []) {
+    try {
+      await copyFile(c.from, path.join(dir, c.name));
+      written.push(path.join(dir, c.name));
+    } catch {
+      // a missing file is part of the evidence: it is simply not listed
+    }
+  }
   await write('summary.json', JSON.stringify({ transportCalls: calls.length, sentItems: sent.length, sentQueries: queries.length, records: snapshots, ...(args.summary ?? {}) }, null, 2) + '\n');
   t.diagnostic(`evidence directory: ${dir}`);
   for (const f of written) t.diagnostic(`evidence: ${f}`);
