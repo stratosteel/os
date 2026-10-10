@@ -26,3 +26,4 @@ In a controlled synthetic document-routing environment with a fixed primitive ca
 ## Change log of this page
 - 2026-10-07: first public version.
 - 2026-10-10: branch fix/astra-review-2026-10-07 (pull request to main) closes review findings OS-POL-01, OS-POL-02, OS-POL-03, OS-APP-01 and G3-MAP of 2026-10-07 in code and tests; no gate passed, G3 stays open.
+- 2026-10-10: branch feat/g3-send-record-a05-a09 (pull request to fix/astra-review-2026-10-07) adds the send record layer (persisted send intent, fenced claim, durable attempt history, reconciliation before any retry, policy recheck at dispatch) with a file-backed fake transport and fault-injection tests for A05 and A09; mock semantics only, no real transport, 0 worker sends; no gate passed, G3 stays open.

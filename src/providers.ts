@@ -3,6 +3,7 @@
  * Real providers (Microsoft Graph, Google Workspace, FABRIX, Odoo, GitHub) implement them one by one;
  * `mock.ts` implements them over fixtures so the server, the policy and the tests run without any tenant.
  */
+import type { SendTransport } from './transport.js';
 
 export interface MailMessage {
   id: string;
@@ -70,6 +71,11 @@ export interface Providers {
   files: FilesProvider;
   records: RecordsProvider;
   memory: MemoryProvider;
+  /**
+   * The only write path out of the company (transport.ts). MailProvider stays read-only; only the send record dispatcher
+   * (send_dispatcher.ts) calls it, never a tool. The mock bundle carries FakeTransport; no real transport exists yet.
+   */
+  transport?: SendTransport;
 }
 
 /** Provider names as they appear in layers.yaml. */
