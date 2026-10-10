@@ -30,6 +30,38 @@ export type ActionCategory =
 
 export type Decision = 'allow' | 'ask' | 'deny';
 
+/** A mail address as it appears in the outgoing message. */
+export interface MessageAddress {
+  address: string;
+  /** Display name every recipient sees; scanned for confidential names. */
+  name?: string;
+}
+
+/** One file exactly as it leaves: the stored document, its immutable revision and the hash of the bytes. */
+export interface AttachmentEvidence {
+  documentId: string;
+  /** Immutable revision of the stored document. */
+  revision: string;
+  /** SHA-256 of the exact bytes that leave, 64 hex characters. */
+  sha256: string;
+  /** File name the recipient sees; scanned for confidential names. */
+  filename: string;
+  /** 'document' states that the file is not a drawing; anything else is treated as a drawing. */
+  kind: 'drawing' | 'document';
+}
+
+/** One completed drawing check: which check, by whom, when, on which document revision. */
+export interface DrawingCheckEvidence {
+  documentId: string;
+  revision: string;
+  /** Name of the check, for example 'text-scan', 'graphics-scan' or 'title-block-review'. */
+  check: string;
+  /** Named person or named scanning agent that did the check. */
+  by: string;
+  /** ISO 8601 time the check was completed. */
+  at: string;
+}
+
 export interface ProposedAction {
   category: ActionCategory;
   /** Autonomy level granted to the worker for this workflow (L0 observe, L1 draft, L2 act in approved scope, L3 free). */
@@ -44,25 +76,52 @@ export interface ProposedAction {
   templateApproved?: boolean;
   /** The message states our own price or a number a person has not approved. */
   statesOurPrice?: boolean;
-  /** Number of completed checks on an attached drawing (3 required). */
-  drawingChecks?: number;
-  /** Outbound text, scanned against the confidential-name denylist. */
-  text?: string;
+  /** The worker is not sure how to classify the action (category, recipient, content): a person decides. */
+  uncertain?: boolean;
   /**
    * The worker's own reading of the local time, 'HH:MM'. A claim, never the clock: the trusted reading in
    * `PolicyContext.now` decides. An unparseable value or a value inside quiet hours denies; it never makes an action pass.
    */
   localTime?: string;
+
+  // Evidence: the actual outgoing message and the exact files, as they will leave.
+  /** Sending identity exactly as it appears in From. */
+  from?: MessageAddress;
+  /** Actual recipients; display names are scanned for confidential names. */
+  to?: MessageAddress[];
+  cc?: MessageAddress[];
+  bcc?: MessageAddress[];
+  /** Subject line, scanned for confidential names. */
+  subject?: string;
+  /** Outbound body text, scanned for confidential names. */
+  text?: string;
+  /** Manifest of the exact files that leave with the message. */
+  attachments?: AttachmentEvidence[];
+  /** Completed drawing checks, each named, by whom and when, on one document revision. A count is not evidence. */
+  drawingChecks?: DrawingCheckEvidence[];
+  /** Template the message was rendered from, and its revision. */
+  templateId?: string;
+  templateVersion?: string;
+  /** Named person responsible for the workflow, the one the disclosure line names. */
+  supervisor?: string;
+  /** The approved disclosure line is in the rendered outgoing message; required for an autonomous external allow. */
+  disclosureRendered?: boolean;
 }
 
 export interface PolicyConfig {
-  /** Names that must never appear in external text (partners, suppliers, customers). The template ships empty. */
-  confidentialNames: string[];
+  /**
+   * Names that must never appear in external text (partners, suppliers, customers). The template ships it unset: an
+   * instance lists its names, or sets an empty list together with `allowEmptyDenylist: true`. Unset, or empty without
+   * that flag, is a configuration error that denies every external action.
+   */
+  confidentialNames?: string[];
+  /** Accept an explicitly empty `confidentialNames` list. */
+  allowEmptyDenylist?: boolean;
   /** IANA timezone of the company clock (for example 'Europe/Bratislava'); quiet hours are read in this zone. */
   timezone: string;
   /** Quiet hours for external sending, local time in `timezone`, inclusive start, exclusive end. */
   quietHours: { start: string; end: string };
-  /** Minimum completed checks before a drawing leaves the company. */
+  /** Minimum distinct named checks on a drawing's exact revision before it leaves the company (whole number, at least 1). */
   drawingChecksRequired: number;
   /** Categories that always need a person, whatever the level (owner: prices, orders, contracts, new counterparties). */
   alwaysAsk: ActionCategory[];
@@ -71,7 +130,7 @@ export interface PolicyConfig {
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
-  confidentialNames: [],
+  // confidentialNames is left unset on purpose: each instance configures its own denylist.
   timezone: 'Europe/Bratislava',
   // 00:00 is the owner's rule (no external sending after midnight). The 06:00 resume time is a configurable
   // implementation choice of this template, not a separately verified owner instruction; an instance records its own.
@@ -169,17 +228,110 @@ export function inQuietHours(localTime: string, quiet: PolicyConfig['quietHours'
   return s <= e ? t >= s && t < e : t >= s || t < e;
 }
 
+const filled = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+const list = <T>(value: T[] | undefined): T[] => (Array.isArray(value) ? value : []);
+
+/** Lower case, accents removed, every separator dropped: 'Beta_Foundry-rev3.pdf' becomes 'betafoundryrev3pdf'. */
+function scanForm(value: string): string {
+  return value.normalize('NFKD').replace(/\p{M}+/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+/** Denylist names found in the text, read through case, accents and separators (spaces, dots, dashes, underscores). */
 export function findConfidentialNames(text: string, names: string[]): string[] {
-  const hay = text.toLowerCase();
-  return names.filter((n) => n.trim() && hay.includes(n.trim().toLowerCase()));
+  const hay = scanForm(text);
+  return names.filter((n) => typeof n === 'string' && scanForm(n).length > 0 && hay.includes(scanForm(n)));
+}
+
+/** An unset denylist, or an empty one without `allowEmptyDenylist`, cannot clear anything: configuration error. */
+function denylistErrors(config: PolicyConfig): string[] {
+  if (!Array.isArray(config.confidentialNames)) {
+    return ['confidential-name denylist is not configured: list the names in confidentialNames, or set an empty list with allowEmptyDenylist: true'];
+  }
+  const usable = config.confidentialNames.filter((n) => typeof n === 'string' && scanForm(n).length > 0);
+  if (!usable.length && config.allowEmptyDenylist !== true) {
+    return ['confidential-name denylist is empty: set allowEmptyDenylist: true to accept an empty list'];
+  }
+  return [];
+}
+
+/** Every outgoing field a recipient reads: subject, body, attachment filenames and the display names in the headers. */
+function scannedFields(action: ProposedAction): [string, string][] {
+  const fields: [string, unknown][] = [['subject', action.subject], ['body', action.text]];
+  for (const a of list(action.attachments)) fields.push(['attachment filename', a?.filename]);
+  fields.push(['from display name', action.from?.name]);
+  for (const [role, recipients] of [['to', action.to], ['cc', action.cc], ['bcc', action.bcc]] as const) {
+    for (const r of list(recipients)) fields.push([`${role} display name`, r?.name]);
+  }
+  return fields.filter((f): f is [string, string] => filled(f[1]));
+}
+
+function nameDenials(action: ProposedAction, config: PolicyConfig): string[] {
+  const names = list(config.confidentialNames);
+  return scannedFields(action).flatMap(([where, value]) => {
+    const hits = findConfidentialNames(value, names);
+    return hits.length ? [`confidential name in ${where}: ${hits.join(', ')}`] : [];
+  });
+}
+
+/** An ISO 8601 date-time such as '2026-10-07T07:30:00Z'. Parsing only; no clock is read. */
+function isInstant(value: unknown): boolean {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value) && !Number.isNaN(Date.parse(value));
+}
+
+/** A drawing leaves only with the required number of distinct named checks, by whom and when, on its exact revision. */
+function drawingDenials(action: ProposedAction, config: PolicyConfig): string[] {
+  const required = config.drawingChecksRequired;
+  if (!Number.isInteger(required) || required < 1) {
+    return [`drawing-check configuration invalid: drawingChecksRequired must be a whole number of at least 1, got ${JSON.stringify(required ?? null)}`];
+  }
+  const reasons: string[] = [];
+  const drawings = list(action.attachments).filter((a) => a?.kind !== 'document');
+  if (action.category === 'drawing_release' && !drawings.length) reasons.push('drawing_release names no drawing in the attachment manifest');
+  for (const d of drawings) {
+    const done = new Set<string>();
+    if (filled(d?.documentId) && filled(d?.revision)) {
+      for (const c of list(action.drawingChecks)) {
+        if (c?.documentId !== d.documentId || c.revision !== d.revision) continue;
+        if (!filled(c.check) || !filled(c.by) || !isInstant(c.at) || !scanForm(c.check)) continue;
+        done.add(scanForm(c.check));
+      }
+    }
+    if (done.size < config.drawingChecksRequired) {
+      reasons.push(`drawing ${filled(d?.filename) ? d.filename : d?.documentId} revision ${d?.revision} has ${done.size} of ${config.drawingChecksRequired} named checks`);
+    }
+  }
+  return reasons;
+}
+
+function attachmentGaps(a: AttachmentEvidence): string[] {
+  const missing: string[] = [];
+  if (!filled(a?.documentId)) missing.push('documentId');
+  if (!filled(a?.revision)) missing.push('revision');
+  if (typeof a?.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(a.sha256)) missing.push('sha256 (64 hex characters)');
+  if (!filled(a?.filename)) missing.push('filename');
+  if (a?.kind !== 'drawing' && a?.kind !== 'document') missing.push('kind (drawing or document)');
+  return missing;
+}
+
+/** What an autonomous external message must carry beyond the worker's claims: disclosure, supervisor, a complete manifest. */
+function messageEvidenceGaps(action: ProposedAction): string[] {
+  const gaps: string[] = [];
+  if (action.disclosureRendered !== true) gaps.push('disclosure line is not rendered in the outgoing message');
+  if (!filled(action.supervisor)) gaps.push('no named supervisor for an autonomous message');
+  list(action.attachments).forEach((a, i) => {
+    const missing = attachmentGaps(a);
+    if (missing.length) gaps.push(`attachment manifest entry ${i + 1} is incomplete: ${missing.join(', ')}`);
+  });
+  return gaps;
 }
 
 export function decide(action: ProposedAction, config: PolicyConfig = DEFAULT_POLICY, context: PolicyContext = {}): PolicyResult {
   const reasons: string[] = [];
   const rank = LEVEL_RANK[action.level];
 
-  // 1. Internal work: reads always; notes and drafts from L1.
+  // 1. Internal work: reads always; notes and drafts from L1. An uncertain classification goes to a person.
   if (!action.external) {
+    if (action.uncertain) return { decision: 'ask', reasons: ['classification is uncertain: a person decides'], disclosureRequired: false };
     if (action.category === 'read') return { decision: 'allow', reasons: ['read is always allowed'], disclosureRequired: false };
     if (rank >= 1 && (action.category === 'internal_note' || action.category === 'draft')) {
       return { decision: 'allow', reasons: ['internal work at L1 or above'], disclosureRequired: false };
@@ -189,19 +341,16 @@ export function decide(action: ProposedAction, config: PolicyConfig = DEFAULT_PO
   }
 
   // 2. Hard denials for anything external, collected together; no later approval overrides them.
-  const denials: string[] = [];
-  if (action.text) {
-    const hits = findConfidentialNames(action.text, config.confidentialNames);
-    if (hits.length) denials.push(`confidential name in external text: ${hits.join(', ')}`);
-  }
-  denials.push(...clockDenials(action, config, context.now));
-  if (action.category === 'drawing_release' || (action.drawingChecks !== undefined && action.drawingChecks < config.drawingChecksRequired)) {
-    const checks = action.drawingChecks ?? 0;
-    if (checks < config.drawingChecksRequired) denials.push(`drawing has ${checks} of ${config.drawingChecksRequired} checks`);
-  }
+  const denials = [
+    ...denylistErrors(config),
+    ...nameDenials(action, config),
+    ...clockDenials(action, config, context.now),
+    ...drawingDenials(action, config),
+  ];
   if (denials.length) return { decision: 'deny', reasons: denials, disclosureRequired: true };
 
-  // 3. Always a person: prices, quotes, orders, contracts, new counterparties, unknown recipients.
+  // 3. Always a person: uncertain classification, prices, quotes, orders, contracts, new counterparties, unknown recipients.
+  if (action.uncertain) reasons.push('classification is uncertain: a person decides');
   if (config.alwaysAsk.includes(action.category)) reasons.push(`${action.category} always needs a person`);
   if (action.statesOurPrice) reasons.push('message states our price');
   if (action.counterpartyInRegister === false) reasons.push('counterparty not in the register');
@@ -217,10 +366,9 @@ export function decide(action: ProposedAction, config: PolicyConfig = DEFAULT_PO
     if (!action.templateApproved) return { decision: 'ask', reasons: ['template not approved by a person'], disclosureRequired: true };
     if (!action.counterpartyInRegister) return { decision: 'ask', reasons: ['counterparty register not confirmed'], disclosureRequired: true };
     if (!action.recipientKnown) return { decision: 'ask', reasons: ['recipient not confirmed in the register'], disclosureRequired: true };
-    if (action.drawingChecks !== undefined && action.drawingChecks < config.drawingChecksRequired) {
-      return { decision: 'deny', reasons: ['drawing checks incomplete'], disclosureRequired: true };
-    }
-    return { decision: 'allow', reasons: ['L2: approved template, registered counterparty and recipient'], disclosureRequired: true };
+    const gaps = messageEvidenceGaps(action);
+    if (gaps.length) return { decision: 'ask', reasons: gaps, disclosureRequired: true };
+    return { decision: 'allow', reasons: ['L2: approved template, registered counterparty and recipient, disclosure rendered, named supervisor'], disclosureRequired: true };
   }
   // L3: free external action is not granted before day 180 and never without an owner rule change (MS-D04).
   return { decision: 'ask', reasons: ['L3 external autonomy is not enabled by the owner'], disclosureRequired: true };

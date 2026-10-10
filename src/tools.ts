@@ -36,6 +36,9 @@ export interface ToolContext {
 
 const Category = z.enum(['read', 'internal_note', 'draft', 'supplier_inquiry', 'supplier_followup', 'customer_quote', 'price', 'order', 'contract', 'new_counterparty', 'drawing_release', 'send_external']);
 const Level = z.enum(['L0', 'L1', 'L2', 'L3']);
+const Address = z.object({ address: z.string(), name: z.string().optional() });
+const Attachment = z.object({ documentId: z.string(), revision: z.string(), sha256: z.string(), filename: z.string(), kind: z.enum(['drawing', 'document']) });
+const DrawingCheck = z.object({ documentId: z.string(), revision: z.string(), check: z.string(), by: z.string(), at: z.string() });
 
 export function buildTools(ctx: ToolContext): ToolDef[] {
   const policy = ctx.policy ?? DEFAULT_POLICY;
@@ -90,11 +93,16 @@ export function buildTools(ctx: ToolContext): ToolDef[] {
     }),
     defineTool({
       name: 'policy_check',
-      description: 'Ask the autonomy policy whether a proposed action is allow, ask or deny, with reasons. Workers call this before any external step.',
+      description: 'Ask the autonomy policy whether a proposed action is allow, ask or deny, with reasons. Workers call this before any external step, with the actual message as evidence: from, to, cc, bcc, subject, text, the attachment manifest, named drawing checks, template id and version, supervisor and whether the disclosure line is rendered.',
       inputSchema: z.object({
         category: Category, level: Level, external: z.boolean(),
         counterpartyInRegister: z.boolean().optional(), recipientKnown: z.boolean().optional(), templateApproved: z.boolean().optional(),
-        statesOurPrice: z.boolean().optional(), drawingChecks: z.number().int().min(0).optional(), text: z.string().optional(), localTime: z.string().optional(),
+        statesOurPrice: z.boolean().optional(), uncertain: z.boolean().optional(), localTime: z.string().optional(),
+        from: Address.optional(), to: z.array(Address).optional(), cc: z.array(Address).optional(), bcc: z.array(Address).optional(),
+        subject: z.string().optional(), text: z.string().optional(),
+        attachments: z.array(Attachment).optional(), drawingChecks: z.array(DrawingCheck).optional(),
+        templateId: z.string().optional(), templateVersion: z.string().optional(),
+        supervisor: z.string().optional(), disclosureRendered: z.boolean().optional(),
       }),
       handler: async (i) => decide(i as unknown as ProposedAction, policy, { now: ctx.clock?.() }),
     }),

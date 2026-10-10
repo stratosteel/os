@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decide, DEFAULT_POLICY, inQuietHours, findConfidentialNames, type PolicyConfig } from '../src/policy.js';
-import { CONFIG, bratislava } from './policy_fixtures.js';
+import { CHECKS, CONFIG, DRAWING, EVIDENCED, TRUSTED, bratislava } from './policy_fixtures.js';
 
-const base = { external: true, counterpartyInRegister: true, recipientKnown: true, templateApproved: true, localTime: '10:00' } as const;
-/** The server's trusted clock reading at 10:00 local; the worker's localTime above is only a claim. */
-const day = { now: bratislava('10:00') };
+/** A message in an approved template to a registered counterparty and recipient, with its evidence. localTime is only a claim. */
+const base = { ...EVIDENCED, localTime: '10:00' };
+/** What the server passes: its own trusted clock reading at 10:00 local. */
+const day = TRUSTED;
 
 test('reads are always allowed, even at L0 and internal', () => {
   assert.equal(decide({ category: 'read', level: 'L0', external: false }).decision, 'allow');
@@ -58,17 +59,19 @@ test('external sending in quiet hours is denied', () => {
 });
 
 test('a drawing leaves only after 3 checks', () => {
-  assert.equal(decide({ ...base, category: 'drawing_release', level: 'L2', drawingChecks: 2 }, CONFIG, day).decision, 'deny');
-  assert.equal(decide({ ...base, category: 'supplier_inquiry', level: 'L2', drawingChecks: 2 }, CONFIG, day).decision, 'deny');
-  assert.equal(decide({ ...base, category: 'supplier_inquiry', level: 'L2', drawingChecks: 3 }, CONFIG, day).decision, 'allow');
+  const drawing = { ...base, attachments: [DRAWING] };
+  assert.equal(decide({ ...drawing, category: 'drawing_release', level: 'L2', drawingChecks: CHECKS.slice(0, 2) }, CONFIG, day).decision, 'deny');
+  assert.equal(decide({ ...drawing, category: 'supplier_inquiry', level: 'L2', drawingChecks: CHECKS.slice(0, 2) }, CONFIG, day).decision, 'deny');
+  assert.equal(decide({ ...drawing, category: 'supplier_inquiry', level: 'L2', drawingChecks: CHECKS }, CONFIG, day).decision, 'allow');
 });
 
 test('confidential names never leave: deny before anything else', () => {
-  const cfg: PolicyConfig = { ...CONFIG, confidentialNames: ['Partner Alpha Works', 'Beta Foundry'] };
+  const names = ['Partner Alpha Works', 'Beta Foundry'];
+  const cfg: PolicyConfig = { ...CONFIG, confidentialNames: names };
   const r = decide({ ...base, category: 'supplier_inquiry', level: 'L2', text: 'Quote based on Beta Foundry pattern' }, cfg, day);
   assert.equal(r.decision, 'deny');
-  assert.deepEqual(findConfidentialNames('we use PARTNER ALPHA works', cfg.confidentialNames), ['Partner Alpha Works']);
-  assert.deepEqual(findConfidentialNames('no names here', cfg.confidentialNames), []);
+  assert.deepEqual(findConfidentialNames('we use PARTNER ALPHA works', names), ['Partner Alpha Works']);
+  assert.deepEqual(findConfidentialNames('no names here', names), []);
 });
 
 test('L3 external autonomy is not enabled: asks', () => {
