@@ -3,8 +3,10 @@
  * They let the access door, the policy and the approval queue run end to end before any tenant exists,
  * and they are the reference behaviour every real provider must match (same shapes, same search semantics).
  */
+import path from 'node:path';
 import type { FileEntry, FilesProvider, JobRecord, MailMessage, MailProvider, MemoryProvider, Providers, RecordsProvider } from './providers.js';
 import { appendEntry, readTail, type LedgerEntry } from './ledger.js';
+import { FakeTransport } from './transport.js';
 
 export const FIXTURE_JOBS: JobRecord[] = [
   {
@@ -144,6 +146,16 @@ export class FileMemory implements MemoryProvider {
   }
 }
 
-export function mockProviders(ledgerPath: string, statePagePath?: string): Providers {
-  return { mail: new MockMail(), files: new MockFiles(), records: new MockRecords(), memory: new FileMemory(ledgerPath, statePagePath) };
+/**
+ * The mock bundle. Sending goes only through the FakeTransport (a file-backed fake provider next to the ledger unless
+ * `transportDir` is given); MockMail stays read-only.
+ */
+export function mockProviders(ledgerPath: string, statePagePath?: string, transportDir?: string): Providers {
+  return {
+    mail: new MockMail(),
+    files: new MockFiles(),
+    records: new MockRecords(),
+    memory: new FileMemory(ledgerPath, statePagePath),
+    transport: new FakeTransport(transportDir ?? path.join(path.dirname(ledgerPath), 'fake-transport')),
+  };
 }
