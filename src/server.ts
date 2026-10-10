@@ -12,7 +12,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { ApprovalQueue } from './approvals.js';
 import { mockProviders } from './mock.js';
-import { DEFAULT_POLICY, type PolicyConfig } from './policy.js';
+import { DEFAULT_POLICY, type PolicyConfig, type PolicyEvidenceVerifier } from './policy.js';
 import type { Providers } from './providers.js';
 import { buildTools, type ToolContext, type ToolDef } from './tools.js';
 
@@ -23,6 +23,10 @@ export interface ServerOptions {
   providers?: Providers;
   policy?: PolicyConfig;
   statePagePath?: string;
+  /** Trusted clock for the policy (default: this process's clock). Tests pin it; a worker never supplies it. */
+  clock?: () => Date;
+  /** Evidence verifier over the instance's trusted records (none in the template: policy_check then never allows at L2). */
+  verifier?: PolicyEvidenceVerifier;
 }
 
 export async function createContext(opts: ServerOptions = {}): Promise<ToolContext> {
@@ -33,6 +37,8 @@ export async function createContext(opts: ServerOptions = {}): Promise<ToolConte
     providers,
     approvals: new ApprovalQueue(path.join(stateDir, 'approvals.jsonl')),
     policy: opts.policy ?? DEFAULT_POLICY,
+    clock: opts.clock ?? (() => new Date()),
+    verifier: opts.verifier,
     caller: opts.caller ?? process.env.OS_CALLER ?? 'agent',
     role: opts.role ?? ((process.env.OS_ROLE === 'human' ? 'human' : 'agent') as 'agent' | 'human'),
   };
