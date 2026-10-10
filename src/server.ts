@@ -6,12 +6,18 @@
  *   OS_STATE    directory for local state (approvals.jsonl, ledger.md when the memory provider is local), default ./state
  *   OS_PROVIDERS mock (default) | later: m365, google, fabrix, odoo, github, chosen per layer from the manifest
  *   OS_STATE_PAGE path of STATE_OF_THE_BUILD.md for the state_of_build tool (optional)
+ *   OS_APPROVERS path of a JSON file with the approver registry (ids, names, scopes, HMAC keys): server configuration
+ *                outside the repository; without it approval_decide and approval_revoke refuse every decision
+ *   OS_ACCESS    path of a JSON file with the read scopes per actor; with the mock providers a demo scope applies
+ *   OS_TENANT    tenant id recorded on approval requests, default tenant-template
  */
 import { McpServer } from '@modelcontextprotocol/server';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { AccessScopes, type AccessPolicy } from './access.js';
 import { ApprovalQueue } from './approvals.js';
-import { mockProviders } from './mock.js';
+import { ApproverRegistry } from './approvers.js';
+import { MOCK_ACCESS, mockProviders } from './mock.js';
 import { DEFAULT_POLICY, type PolicyConfig, type PolicyEvidenceVerifier } from './policy.js';
 import type { Providers } from './providers.js';
 import { buildTools, type ToolContext, type ToolDef } from './tools.js';
@@ -27,12 +33,20 @@ export interface ServerOptions {
   clock?: () => Date;
   /** Evidence verifier over the instance's trusted records (none in the template: policy_check then never allows at L2). */
   verifier?: PolicyEvidenceVerifier;
+  /** Approvers configured on this server; without them no decision can be authenticated. */
+  approvers?: ApproverRegistry;
+  /** Read scopes per actor; default: the demo scope with the mock providers, none (every read refused) otherwise. */
+  access?: AccessPolicy;
+  tenant?: string;
 }
 
 export async function createContext(opts: ServerOptions = {}): Promise<ToolContext> {
   const stateDir = opts.stateDir ?? process.env.OS_STATE ?? path.resolve('state');
   await mkdir(stateDir, { recursive: true });
   const providers = opts.providers ?? mockProviders(path.join(stateDir, 'ledger.md'), opts.statePagePath ?? process.env.OS_STATE_PAGE);
+  const approvers = opts.approvers ?? (process.env.OS_APPROVERS ? ApproverRegistry.fromJson(await readFile(process.env.OS_APPROVERS, 'utf8')) : undefined);
+  const access: AccessPolicy | undefined = opts.access
+    ?? (process.env.OS_ACCESS ? (JSON.parse(await readFile(process.env.OS_ACCESS, 'utf8')) as AccessPolicy) : opts.providers ? undefined : MOCK_ACCESS);
   return {
     providers,
     approvals: new ApprovalQueue(path.join(stateDir, 'approvals.jsonl')),
@@ -41,6 +55,9 @@ export async function createContext(opts: ServerOptions = {}): Promise<ToolConte
     verifier: opts.verifier,
     caller: opts.caller ?? process.env.OS_CALLER ?? 'agent',
     role: opts.role ?? ((process.env.OS_ROLE === 'human' ? 'human' : 'agent') as 'agent' | 'human'),
+    ...(approvers ? { approvers } : {}),
+    ...(access ? { access: new AccessScopes(access) } : {}),
+    tenant: opts.tenant ?? process.env.OS_TENANT ?? 'tenant-template',
   };
 }
 

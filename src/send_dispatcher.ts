@@ -24,6 +24,7 @@
 import { recheckAtDispatch, type ApprovalState, type PolicyConfig, type PolicyEvidenceVerifier, type ProposedAction } from './policy.js';
 import type { ApprovalQueue } from './approvals.js';
 import { errorText, pause } from './file_lock.js';
+import { sha256Hex } from './message.js';
 import { classifyFailure, type OutgoingMessage, type SendTransport, type SentEvidence } from './transport.js';
 import { hasUnresolvedAttempt, sendRecordSummary, type SendRecord, type SendRecordStore, type SubmitOutcome } from './send_record.js';
 
@@ -31,6 +32,26 @@ import { hasUnresolvedAttempt, sendRecordSummary, type SendRecord, type SendReco
 export type DispatchPoint = 'after_claim' | 'after_submit_started' | 'after_final_check' | 'after_ack' | 'after_result';
 
 export type DispatchCheck = { ok: true } | { ok: false; reasons: string[] };
+
+/** The exact bytes of one attachment, resolved and verified at the dispatch boundary. */
+export interface AttachmentBytes {
+  documentId: string;
+  revision: string;
+  bytes: Uint8Array;
+}
+
+/**
+ * Result of the dispatch gate (A11). ok: the bytes that leave and the evidence to record with the submission. Not ok:
+ * 0 transport calls; `newApproval` files the new approval request the refusal calls for.
+ */
+export type GateResult =
+  | { ok: true; attachments?: AttachmentBytes[]; bindingHash?: string; registrySeq?: number }
+  | { ok: false; reasons: string[]; newApproval?: () => Promise<{ approvalId: string; bindingHash: string }> };
+
+/** The last check before a submission: re-reads trusted current state and compares it with what was approved. */
+export interface DispatchGate {
+  check(record: SendRecord, context: { worker: string; fence: number; attempt: number }): Promise<GateResult>;
+}
 
 export interface DispatcherOptions {
   store: SendRecordStore;
@@ -47,6 +68,8 @@ export interface DispatcherOptions {
   observeAfterAccept?: boolean;
   /** Dispatch-time check at the side-effect boundary; a refusal means 0 transport calls. */
   beforeSubmit?: (record: SendRecord) => Promise<DispatchCheck> | DispatchCheck;
+  /** The approval-binding gate (approval_binding.ts), run after beforeSubmit, immediately before the submission is recorded. */
+  gate?: DispatchGate;
   /** Files the escalation for a person (an approval request) and returns its id. */
   escalate?: (record: SendRecord, reason: string) => Promise<string | undefined>;
   /** Fault-injection hook for tests. */
@@ -67,9 +90,10 @@ export interface DispatchOutcome {
 
 type AttemptResult = { outcome: SubmitOutcome; status?: number; transportMessageId?: string; deduplicated?: boolean; error?: string };
 
-/** The message exactly as stored in the intent, with its correlation id. */
-export function outgoingOf(record: SendRecord): OutgoingMessage {
+/** The message exactly as stored in the intent, with its correlation id and, when resolved, the exact attachment bytes. */
+export function outgoingOf(record: SendRecord, bytes: AttachmentBytes[] = []): OutgoingMessage {
   const m = record.intent.message;
+  const find = (documentId: string, revision: string) => bytes.find((b) => b.documentId === documentId && b.revision === revision)?.bytes;
   return {
     correlationId: record.intent.correlationId,
     from: m.from,
@@ -78,7 +102,10 @@ export function outgoingOf(record: SendRecord): OutgoingMessage {
     bcc: m.bcc,
     subject: m.subject,
     body: m.body,
-    attachments: m.attachments.map((a) => ({ ...a })),
+    attachments: m.attachments.map((a) => {
+      const b = find(a.documentId, a.revision);
+      return b ? { ...a, bytes: b } : { ...a };
+    }),
   };
 }
 
@@ -211,9 +238,9 @@ export class SendDispatcher {
     return r.accepted;
   }
 
-  private async submitOnce(record: SendRecord, attempt: number): Promise<AttemptResult> {
+  private async submitOnce(record: SendRecord, attempt: number, bytes?: AttachmentBytes[]): Promise<AttemptResult> {
     try {
-      const ack = await this.transport.submit(outgoingOf(record), { idempotencyKey: record.intent.idempotencyKey, attempt, worker: this.worker });
+      const ack = await this.transport.submit(outgoingOf(record, bytes), { idempotencyKey: record.intent.idempotencyKey, attempt, worker: this.worker });
       return {
         outcome: 'accepted',
         status: ack.status,
@@ -267,6 +294,23 @@ export class SendDispatcher {
     }
   }
 
+  /** A gate refusal: file the new approval it calls for, record the block; 0 transport calls. */
+  private async refuse(intentId: string, fence: number, gate: Extract<GateResult, { ok: false }>, submitted: number): Promise<DispatchOutcome> {
+    const reasons = [...gate.reasons];
+    if (gate.newApproval) {
+      try {
+        const requested = await gate.newApproval();
+        await this.store.transact(intentId, this.worker, (rec) =>
+          rec.fence === fence ? { type: 'approval_requested', fence, approvalId: requested.approvalId, bindingHash: requested.bindingHash, reasons: gate.reasons } : { veto: 'fence superseded' });
+        reasons.push(`new approval requested: ${requested.approvalId}`);
+      } catch (e) {
+        reasons.push(`a new approval could not be requested: ${errorText(e)}`);
+      }
+    }
+    const b = await this.store.transact(intentId, this.worker, (rec) => (rec.fence === fence ? { type: 'dispatch_blocked', fence, reasons } : { veto: 'fence superseded' }));
+    return { kind: 'blocked', submitted, record: b.record, reason: reasons.join('; ') };
+  }
+
   private async run(intentId: string, fence: number): Promise<DispatchOutcome> {
     let submitted = 0;
     let dedupRetry = false;
@@ -297,6 +341,18 @@ export class SendDispatcher {
       }
       if (!(await this.renew(intentId, fence))) return this.fenced(intentId, fence, 'submit', `fence ${fence} lost its lease before the submission`, submitted);
 
+      // A11: re-read trusted current state and compare it with what was approved, as late as possible. Without a gate an
+      // approved send or a drawing does not leave: a generic approval status is not enough.
+      const needsGate = record.intent.authorization.kind === 'approval' || record.approvalChain.length > 0 || record.intent.message.attachments.some((a) => a.kind !== 'document');
+      if (!this.options.gate && needsGate) {
+        return this.refuse(intentId, fence, { ok: false, reasons: ['no approval-binding gate is configured: an approved send or a drawing is dispatched only through the gate (A11)'] }, submitted);
+      }
+      let gate: GateResult | undefined;
+      if (this.options.gate) {
+        gate = await this.options.gate.check(record, { worker: this.worker, fence, attempt: record.attempts.length + 1 });
+        if (!gate.ok) return this.refuse(intentId, fence, gate, submitted);
+      }
+      const evidence = gate?.ok ? gate : undefined;
       const dedupProof = dedupRetry && this.transport.deduplication.kind === 'idempotency-key' ? this.transport.deduplication.evidence : undefined;
       const started = await this.store.transact(intentId, this.worker, (rec, now) => {
         if (rec.fence !== fence || !rec.lease || rec.lease.released || Date.parse(rec.lease.until) <= now.getTime()) return { veto: `fence ${fence} no longer holds a live lease` };
@@ -307,6 +363,9 @@ export class SendDispatcher {
           contentHash: rec.intent.contentHash,
           idempotencyKey: rec.intent.idempotencyKey,
           ...(dedupProof ? { dedupProof } : {}),
+          ...(evidence?.bindingHash ? { bindingHash: evidence.bindingHash } : {}),
+          ...(evidence?.registrySeq !== undefined ? { registrySeq: evidence.registrySeq } : {}),
+          ...(evidence?.attachments ? { attachmentBytes: evidence.attachments.map((a) => ({ documentId: a.documentId, revision: a.revision, sha256: sha256Hex(a.bytes) })) } : {}),
         };
       });
       if (!started.accepted || started.event?.type !== 'submit_started') {
@@ -327,7 +386,7 @@ export class SendDispatcher {
       }
       await this.point('after_final_check', current);
 
-      const result = await this.submitOnce(current, attempt);
+      const result = await this.submitOnce(current, attempt, evidence?.attachments);
       submitted += 1;
       await this.point('after_ack', current);
       const recorded = await this.store.transact(intentId, this.worker, () => ({ type: 'submit_result', fence, attempt, ...result }));
@@ -377,11 +436,12 @@ export function policyRecheck(
   };
 }
 
-/** The approval state of an approval id as the queue holds it. */
+/** The approval state of an approval id as the queue holds it; a revoked approval no longer authorizes: rejected. */
 export function approvalStateFrom(queue: ApprovalQueue): (approvalId: string) => Promise<ApprovalState | undefined> {
   return async (approvalId) => {
-    const view = (await queue.list()).find((v) => v.id === approvalId);
-    return view ? { status: view.status } : undefined;
+    const view = await queue.get(approvalId);
+    if (!view) return undefined;
+    return { status: view.status === 'revoked' ? 'rejected' : view.status };
   };
 }
 

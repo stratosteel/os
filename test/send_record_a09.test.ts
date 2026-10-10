@@ -270,7 +270,9 @@ test('A09: separate states with a timestamp each; the record never says sent or 
   const s = await setup('a09-labels', { default: [{ kind: 'accept', sentVisibleAfterQueries: 1 }] }, {
     input: { authorization: { kind: 'approval', approvalId: 'approval-0001' } },
   });
-  const accepted = await s.dispatcher('worker-a').dispatch(s.id);
+  // This case checks the record's fields and labels. An approval-authorized send needs the approval-binding gate since
+  // A11; an accept-all test gate stands in here, the binding itself is pinned in test/approval_binding_a11.test.ts.
+  const accepted = await s.dispatcher('worker-a', { gate: { check: async () => ({ ok: true }) } }).dispatch(s.id);
   assert.equal(accepted.kind, 'accepted');
   const r1 = accepted.record;
   assert.equal(r1.state, 'accepted', 'a 202 acceptance with nothing in Sent yet is accepted, not sent');
