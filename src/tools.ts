@@ -27,6 +27,8 @@ export interface ToolContext {
   providers: Providers;
   approvals: ApprovalQueue;
   policy?: PolicyConfig;
+  /** Trusted clock of the server process. policy_check passes its reading to the policy; without it external actions are denied. */
+  clock?: () => Date;
   /** Identity of the caller as configured at startup: an agent id or a person's name. */
   caller: string;
   role: 'agent' | 'human';
@@ -94,7 +96,7 @@ export function buildTools(ctx: ToolContext): ToolDef[] {
         counterpartyInRegister: z.boolean().optional(), recipientKnown: z.boolean().optional(), templateApproved: z.boolean().optional(),
         statesOurPrice: z.boolean().optional(), drawingChecks: z.number().int().min(0).optional(), text: z.string().optional(), localTime: z.string().optional(),
       }),
-      handler: async (i) => decide(i as unknown as ProposedAction, policy),
+      handler: async (i) => decide(i as unknown as ProposedAction, policy, { now: ctx.clock?.() }),
     }),
     defineTool({
       name: 'approval_request',

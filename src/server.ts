@@ -23,6 +23,8 @@ export interface ServerOptions {
   providers?: Providers;
   policy?: PolicyConfig;
   statePagePath?: string;
+  /** Trusted clock for the policy (default: this process's clock). Tests pin it; a worker never supplies it. */
+  clock?: () => Date;
 }
 
 export async function createContext(opts: ServerOptions = {}): Promise<ToolContext> {
@@ -33,6 +35,7 @@ export async function createContext(opts: ServerOptions = {}): Promise<ToolConte
     providers,
     approvals: new ApprovalQueue(path.join(stateDir, 'approvals.jsonl')),
     policy: opts.policy ?? DEFAULT_POLICY,
+    clock: opts.clock ?? (() => new Date()),
     caller: opts.caller ?? process.env.OS_CALLER ?? 'agent',
     role: opts.role ?? ((process.env.OS_ROLE === 'human' ? 'human' : 'agent') as 'agent' | 'human'),
   };
