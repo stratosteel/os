@@ -16,6 +16,24 @@ const Layer = z.object({
   status: Status,
 }).loose();
 
+/** What a GitHub token looks like (classic and fine-grained prefixes): refused in configuration, redacted from messages. */
+export const GITHUB_TOKEN_SHAPE = /\b(gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,})/g;
+
+/**
+ * A credential is configured by the NAME of the environment variable that holds it, never by its value. The errors never
+ * repeat the value: a token pasted into the configuration must not be echoed into a log by the check that refuses it.
+ */
+export function envVarNameErrors(name: unknown): string[] {
+  if (typeof name !== 'string' || !name.trim()) return ['must name an environment variable, for example OS_GITHUB_TOKEN'];
+  if (/^(gh[pousr]_|github_pat_)/i.test(name.trim())) return ['looks like a token, not the name of an environment variable; the value is not repeated here; remove it from the file and rotate it'];
+  if (!/^[A-Z_][A-Z0-9_]{0,127}$/.test(name)) return ['must be an environment variable name: capital letters, digits and underscores, not starting with a digit'];
+  return [];
+}
+
+const EnvVarName = z.string().superRefine((value, ctx) => {
+  for (const message of envVarNameErrors(value)) ctx.addIssue({ code: 'custom', message: `token_env ${message}` });
+});
+
 export const ManifestSchema = z.object({
   schema: z.literal('stratosteel-os/layers/v0.1'),
   company: z.object({
@@ -28,7 +46,15 @@ export const ManifestSchema = z.object({
     L1_tenant: Layer.extend({ provider: z.enum(['m365', 'google', 'none']) }),
     L2_records: Layer.extend({ provider: z.enum(['fabrix', 'odoo', 'none']) }),
     L3_runtime: Layer.extend({ provider: z.enum(['managed-agents', 'forge', 'none']), budget_usd_cap: z.number().nonnegative() }),
-    L4_memory: Layer.extend({ provider: z.enum(['github', 'none']), repo: z.string(), ledger_path: z.string(), state_page: z.string() }),
+    L4_memory: Layer.extend({
+      provider: z.enum(['github', 'none']), repo: z.string(), ledger_path: z.string(), state_page: z.string(),
+      /** Branch of the memory repository; the repository's default branch when absent. */
+      branch: z.string().min(1).optional(),
+      /** Name of the environment variable holding the GitHub token (src/providers/github.ts). */
+      token_env: EnvVarName.optional(),
+      /** Machine channel between AI roles (src/bus/): its namespace directory inside the bus repository. */
+      bus: z.object({ namespace: z.string().min(1), branch: z.string().min(1).optional() }).loose().optional(),
+    }),
     L5_access: Layer.extend({ provider: z.literal('mcp'), transport: z.enum(['stdio', 'http']) }),
     L6_gates: Layer.extend({ policy: z.string() }),
   }),
