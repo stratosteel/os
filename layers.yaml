@@ -35,7 +35,9 @@ layers:
     ledger_path: 02_PROGRAMS/HANDOVER_LEDGER.md
     state_page: STATE_OF_THE_BUILD.md
     token_env: OS_GITHUB_TOKEN   # NAME of the environment variable holding the token; the token never enters a file
-    status: planned
+    bus:                         # machine channel between AI roles (XS coordination pattern), metadata only
+      namespace: bus             # the bus writes only inside this directory of its repository
+    status: coded
   L5_access:
     purpose: one door for every AI (chat assistants, coding agents, workers) to mail, files, records, memory
     provider: mcp
