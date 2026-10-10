@@ -7,6 +7,10 @@ import path from 'node:path';
 import type { FileEntry, FilesProvider, JobRecord, MailMessage, MailProvider, MemoryProvider, Providers, RecordsProvider } from './providers.js';
 import { appendEntry, readTail, type LedgerEntry } from './ledger.js';
 import { FakeTransport } from './transport.js';
+import type { AccessPolicy } from './access.js';
+
+/** Read scopes for the mock data only: the two fixture actors read every fixture job. Real providers get no default. */
+export const MOCK_ACCESS: AccessPolicy = { 'worker-1': { jobs: '*' }, 'M. Example': { jobs: '*' } };
 
 export const FIXTURE_JOBS: JobRecord[] = [
   {

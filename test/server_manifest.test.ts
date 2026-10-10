@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { ApproverRegistry, signDecision } from '../src/approvers.js';
 import { createServer } from '../src/server.js';
 import { parseManifest, gateOrderErrors } from '../src/manifest.js';
 import type { ToolDef } from '../src/tools.js';
@@ -45,8 +47,13 @@ test('worked flow over mock providers: inquiry mail -> job -> files -> policy ->
   assert.equal(pending.length, 1);
   assert.ok(!w.tools.some((t) => t.name === 'approval_decide'), 'a worker must not be able to decide');
 
-  const h = await createServer({ stateDir: dir, role: 'human', caller: 'M. Example' });
-  const decided = (await tool(h.tools, 'approval_decide').handler({ id: req.id, decision: 'approved', note: 'numbers checked' })) as { status: string; decision: { decidedBy: string } };
+  // A10: the person's client signs the decision with the approver key the server is configured with (test key).
+  const key = randomBytes(32).toString('base64');
+  const approvers = new ApproverRegistry([{ id: 'approver-1', name: 'M. Example', key, scopes: [{ tenant: 'tenant-template', categories: ['customer_quote'] }] }]);
+  const h = await createServer({ stateDir: dir, role: 'human', caller: 'M. Example', approvers });
+  const issuedAt = new Date();
+  const token = signDecision(key, { approverId: 'approver-1', approvalId: req.id, decision: 'approved', bindingHash: null, issuedAt: issuedAt.toISOString(), expiresAt: new Date(issuedAt.getTime() + 300_000).toISOString() });
+  const decided = (await tool(h.tools, 'approval_decide').handler({ id: req.id, decision: 'approved', note: 'numbers checked', token })) as { status: string; decision: { decidedBy: string } };
   assert.equal(decided.status, 'approved');
   assert.equal(decided.decision.decidedBy, 'M. Example');
 

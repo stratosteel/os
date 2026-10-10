@@ -377,11 +377,12 @@ export function policyRecheck(
   };
 }
 
-/** The approval state of an approval id as the queue holds it. */
+/** The approval state of an approval id as the queue holds it; a revoked approval no longer authorizes: rejected. */
 export function approvalStateFrom(queue: ApprovalQueue): (approvalId: string) => Promise<ApprovalState | undefined> {
   return async (approvalId) => {
-    const view = (await queue.list()).find((v) => v.id === approvalId);
-    return view ? { status: view.status } : undefined;
+    const view = await queue.get(approvalId);
+    if (!view) return undefined;
+    return { status: view.status === 'revoked' ? 'rejected' : view.status };
   };
 }
 

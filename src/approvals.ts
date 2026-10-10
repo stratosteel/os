@@ -11,7 +11,7 @@
 import { appendFile, link, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'revoked';
 
 export interface ApprovalRequest {
   id: string;
@@ -21,21 +21,47 @@ export interface ApprovalRequest {
   summary: string;              // one line a person reads
   payload: Record<string, unknown>;
   reasons: string[];            // why the policy said ask
+  /** Tenant of the request, set by the server from its configuration. */
+  tenant?: string;
+  /** Job the request belongs to, for scoped reads and the approver's job scope. */
+  jobId?: string;
+  /** Amount the decision commits, for the approver's ceiling. */
+  amount?: number;
+  /** Binding of a send approval, computed by the server from trusted state; never worker-supplied. */
+  binding?: unknown;
+  /** SHA-256 of the canonical binding; a decision must name it. */
+  bindingHash?: string;
 }
 
 export interface ApprovalDecision {
   id: string;
   decidedAt: string;
   decidedBy: string;            // a named person
-  decision: Exclude<ApprovalStatus, 'pending'>;
+  decision: 'approved' | 'rejected';
+  note?: string;
+  /** Configured approver whose signed token authenticated this decision. */
+  approverId?: string;
+  /** Binding hash the approver decided on; equals the request's bindingHash. */
+  bindingHash?: string;
+}
+
+export interface ApprovalRevocation {
+  id: string;
+  revokedAt: string;
+  revokedBy: string;
+  approverId?: string;
   note?: string;
 }
 
-type Event = { type: 'request'; data: ApprovalRequest } | { type: 'decision'; data: ApprovalDecision };
+type Event =
+  | { type: 'request'; data: ApprovalRequest }
+  | { type: 'decision'; data: ApprovalDecision }
+  | { type: 'revocation'; data: ApprovalRevocation };
 
 export interface ApprovalView extends ApprovalRequest {
   status: ApprovalStatus;
   decision?: ApprovalDecision;
+  revocation?: ApprovalRevocation;
 }
 
 export interface ApprovalQueueOptions {
@@ -51,7 +77,7 @@ const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 function isEvent(value: unknown): value is Event {
   const ev = value as Partial<Event> | null;
-  return !!ev && (ev.type === 'request' || ev.type === 'decision') && typeof ev.data?.id === 'string';
+  return !!ev && (ev.type === 'request' || ev.type === 'decision' || ev.type === 'revocation') && typeof ev.data?.id === 'string';
 }
 
 function lockToken(content: string): unknown {
@@ -66,16 +92,25 @@ function sameDecision(a: ApprovalDecision, b: ApprovalDecision): boolean {
   return a.id === b.id && a.decidedAt === b.decidedAt && a.decidedBy === b.decidedBy && a.decision === b.decision && (a.note ?? null) === (b.note ?? null);
 }
 
-/** State rebuilt from the events: the first decision on a request is the decision; a later one is never applied. */
+/**
+ * State rebuilt from the events: the first decision on a request is the decision, a later one is never applied; the
+ * first revocation of an approved request makes it revoked.
+ */
 function rebuild(events: Event[]): Map<string, ApprovalView> {
   const byId = new Map<string, ApprovalView>();
   for (const ev of events) {
     if (ev.type === 'request') byId.set(ev.data.id, { ...ev.data, status: 'pending' });
-    else {
+    else if (ev.type === 'decision') {
       const v = byId.get(ev.data.id);
       if (v && v.status === 'pending') {
         v.status = ev.data.decision;
         v.decision = ev.data;
+      }
+    } else {
+      const v = byId.get(ev.data.id);
+      if (v && v.status === 'approved') {
+        v.status = 'revoked';
+        v.revocation = ev.data;
       }
     }
   }
@@ -234,23 +269,61 @@ export class ApprovalQueue {
     return status ? all.filter((v) => v.status === status) : all;
   }
 
+  async get(id: string): Promise<ApprovalView | undefined> {
+    return rebuild(await this.events()).get(id);
+  }
+
+  /**
+   * Run `work` with the queue's state while holding the store lock, so no decision or revocation is recorded meanwhile.
+   * The dispatch gate reads an approval this way and takes the document registry's fence inside it (lock order: this
+   * queue, then the registry; nothing takes them the other way round). `work` must not write to this queue.
+   */
+  async readLocked<T>(work: (state: ReadonlyMap<string, ApprovalView>) => Promise<T>): Promise<T> {
+    return this.withLock(async () => work(rebuild(this.parse(await this.readStore()))));
+  }
+
   /**
    * One decision per request, as an atomic transition: the state is read and the decision appended under the store
    * lock. Of two racing deciders exactly one succeeds; the other gets "already approved" or "already rejected".
    */
-  async decide(id: string, decision: 'approved' | 'rejected', decidedBy: string, note?: string): Promise<ApprovalView> {
+  async decide(id: string, decision: 'approved' | 'rejected', decidedBy: string, note?: string, authenticated: { approverId?: string; bindingHash?: string } = {}): Promise<ApprovalView> {
     if (!decidedBy.trim()) throw new Error('decidedBy must name a person');
     return this.withLock(async () => {
       const text = await this.readStore();
       const current = rebuild(this.parse(text)).get(id);
       if (!current) throw new Error(`unknown approval ${id}`);
       if (current.status !== 'pending') throw new Error(`approval ${id} already ${current.status}`);
-      const d: ApprovalDecision = { id, decidedAt: this.now().toISOString(), decidedBy, decision, note };
+      if (current.bindingHash !== undefined && authenticated.bindingHash !== current.bindingHash) {
+        throw new Error(`approval ${id} binds ${current.bindingHash}; the decision names ${authenticated.bindingHash ?? 'no binding'}`);
+      }
+      const d: ApprovalDecision = {
+        id, decidedAt: this.now().toISOString(), decidedBy, decision, note,
+        ...(authenticated.approverId ? { approverId: authenticated.approverId } : {}),
+        ...(current.bindingHash !== undefined ? { bindingHash: current.bindingHash } : {}),
+      };
       await this.appendLocked(text, { type: 'decision', data: d });
       // Defense in depth: the decision on record must be this one; if the lock was ever defeated, the loser still fails.
       const recorded = rebuild(await this.events()).get(id);
       if (!recorded?.decision || !sameDecision(recorded.decision, d)) throw new Error(`approval ${id} already ${recorded?.status ?? 'decided'}`);
       return { ...current, status: decision, decision: d };
+    });
+  }
+
+  /** Revoke an approved request, once, under the store lock. A pending request is rejected instead. */
+  async revoke(id: string, revokedBy: string, note?: string, authenticated: { approverId?: string } = {}): Promise<ApprovalView> {
+    if (!revokedBy.trim()) throw new Error('revokedBy must name a person');
+    return this.withLock(async () => {
+      const text = await this.readStore();
+      const current = rebuild(this.parse(text)).get(id);
+      if (!current) throw new Error(`unknown approval ${id}`);
+      if (current.status !== 'approved') throw new Error(`approval ${id} is ${current.status}: only an approved request can be revoked`);
+      const r: ApprovalRevocation = { id, revokedAt: this.now().toISOString(), revokedBy, ...(note ? { note } : {}), ...(authenticated.approverId ? { approverId: authenticated.approverId } : {}) };
+      await this.appendLocked(text, { type: 'revocation', data: r });
+      const recorded = rebuild(await this.events()).get(id);
+      if (recorded?.status !== 'revoked' || recorded.revocation?.revokedAt !== r.revokedAt || recorded.revocation.revokedBy !== revokedBy) {
+        throw new Error(`approval ${id} revocation was not recorded`);
+      }
+      return recorded;
     });
   }
 }
