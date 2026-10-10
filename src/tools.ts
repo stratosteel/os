@@ -7,7 +7,7 @@
 import * as z from 'zod/v4';
 import type { Providers } from './providers.js';
 import { ApprovalQueue } from './approvals.js';
-import { decide, DEFAULT_POLICY, type PolicyConfig, type ProposedAction } from './policy.js';
+import { decide, DEFAULT_POLICY, type PolicyConfig, type PolicyEvidenceVerifier, type ProposedAction } from './policy.js';
 
 export interface ToolDef<S extends z.ZodObject = z.ZodObject> {
   name: string;
@@ -29,6 +29,8 @@ export interface ToolContext {
   policy?: PolicyConfig;
   /** Trusted clock of the server process. policy_check passes its reading to the policy; without it external actions are denied. */
   clock?: () => Date;
+  /** Evidence verifier over the instance's trusted records. Without it policy_check never returns allow for an L2 action. */
+  verifier?: PolicyEvidenceVerifier;
   /** Identity of the caller as configured at startup: an agent id or a person's name. */
   caller: string;
   role: 'agent' | 'human';
@@ -104,7 +106,7 @@ export function buildTools(ctx: ToolContext): ToolDef[] {
         templateId: z.string().optional(), templateVersion: z.string().optional(),
         supervisor: z.string().optional(), disclosureRendered: z.boolean().optional(),
       }),
-      handler: async (i) => decide(i as unknown as ProposedAction, policy, { now: ctx.clock?.() }),
+      handler: async (i) => decide(i as unknown as ProposedAction, policy, { now: ctx.clock?.(), verifier: ctx.verifier }),
     }),
     defineTool({
       name: 'approval_request',

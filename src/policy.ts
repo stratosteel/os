@@ -66,13 +66,14 @@ export interface ProposedAction {
   category: ActionCategory;
   /** Autonomy level granted to the worker for this workflow (L0 observe, L1 draft, L2 act in approved scope, L3 free). */
   level: AutonomyLevel;
-  /** Message leaves the company (e-mail, portal, chat with an outside party). */
+  /** Message leaves the company (e-mail, portal, chat with an outside party). Categories in EXTERNAL_CATEGORIES are external whatever this says. */
   external: boolean;
-  /** Counterparty is in the approved supplier or customer register. */
+  // Worker claims. A false claim makes the decision stricter; a true claim grants nothing: the evidence verifier decides.
+  /** Claim: the counterparty is in the approved supplier or customer register. */
   counterpartyInRegister?: boolean;
-  /** Recipient address is known in the register for that counterparty. */
+  /** Claim: the recipient address is known in the register for that counterparty. */
   recipientKnown?: boolean;
-  /** The template used was approved by a person. */
+  /** Claim: the template used was approved by a person. */
   templateApproved?: boolean;
   /** The message states our own price or a number a person has not approved. */
   statesOurPrice?: boolean;
@@ -147,10 +148,30 @@ export interface PolicyResult {
   disclosureRequired: boolean;
 }
 
+/**
+ * Checks of the worker's evidence against trusted records that the caller has already loaded: approved template
+ * revisions, the counterparty register, sending identities, the document store and drawing-check records. The policy
+ * calls these synchronous checks with plain data and reads nothing itself. Without a verifier no L2 action is allowed.
+ */
+export interface PolicyEvidenceVerifier {
+  /** This exact template revision exists and a person approved it. */
+  templateApproved(templateId: string, templateVersion: string): boolean;
+  /** The address is a registered recipient of a counterparty in the approved register. */
+  recipientInRegister(address: string): boolean;
+  /** The address is a sending identity this worker may use: a service mailbox, never a person's own mailbox. */
+  senderAuthorized(address: string): boolean;
+  /** The document store holds this immutable revision with exactly these bytes (sha256), this file name and kind. */
+  attachmentMatches(attachment: AttachmentEvidence): boolean;
+  /** This named check is on record for this document revision, by this person, at this time. */
+  drawingCheckRecorded(check: DrawingCheckEvidence): boolean;
+}
+
 /** What the caller supplies at decision time. It comes from the server, never from the worker. */
 export interface PolicyContext {
   /** Trusted clock reading taken by the caller at the moment of the decision. Without it every external action is denied. */
   now?: Date;
+  /** Evidence verifier over the instance's trusted records. Without it an L2 action asks, never allows. */
+  verifier?: PolicyEvidenceVerifier;
 }
 
 /** The state of a person's decision on an approval request, as the approval queue reports it. */
@@ -159,6 +180,9 @@ export interface ApprovalState {
 }
 
 const LEVEL_RANK: Record<AutonomyLevel, number> = { L0: 0, L1: 1, L2: 2, L3: 3 };
+
+/** Categories that leave the company by definition: the worker's external flag cannot make them internal. */
+export const EXTERNAL_CATEGORIES: readonly ActionCategory[] = ['supplier_inquiry', 'supplier_followup', 'customer_quote', 'new_counterparty', 'drawing_release', 'send_external'];
 
 /** Minutes after midnight of an 'H:MM' or 'HH:MM' time; throws on anything else, including out-of-range values like 99:99. */
 function minutes(hhmm: string): number {
@@ -278,8 +302,11 @@ function isInstant(value: unknown): boolean {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value) && !Number.isNaN(Date.parse(value));
 }
 
-/** A drawing leaves only with the required number of distinct named checks, by whom and when, on its exact revision. */
-function drawingDenials(action: ProposedAction, config: PolicyConfig): string[] {
+/**
+ * A drawing leaves only with the required number of distinct named checks, by whom and when, on its exact revision.
+ * With a verifier only checks on record count.
+ */
+function drawingDenials(action: ProposedAction, config: PolicyConfig, verifier: PolicyEvidenceVerifier | undefined): string[] {
   const required = config.drawingChecksRequired;
   if (!Number.isInteger(required) || required < 1) {
     return [`drawing-check configuration invalid: drawingChecksRequired must be a whole number of at least 1, got ${JSON.stringify(required ?? null)}`];
@@ -293,6 +320,7 @@ function drawingDenials(action: ProposedAction, config: PolicyConfig): string[] 
       for (const c of list(action.drawingChecks)) {
         if (c?.documentId !== d.documentId || c.revision !== d.revision) continue;
         if (!filled(c.check) || !filled(c.by) || !isInstant(c.at) || !scanForm(c.check)) continue;
+        if (verifier && !verifier.drawingCheckRecorded(c)) continue;
         done.add(scanForm(c.check));
       }
     }
@@ -313,6 +341,39 @@ function attachmentGaps(a: AttachmentEvidence): string[] {
   return missing;
 }
 
+/** A worker never sends as an identity it is not authorized for, in particular a person's own mailbox. */
+function senderDenials(action: ProposedAction, verifier: PolicyEvidenceVerifier | undefined): string[] {
+  const from = action.from?.address;
+  if (!verifier || !filled(from) || verifier.senderAuthorized(from)) return [];
+  return [`sending identity ${from} is not authorized for workers: a worker never sends as a person's own mailbox`];
+}
+
+/**
+ * The evidence references an L2 allow needs (template revision, From, To) and the verifier's verdict on each of them,
+ * on every Cc and Bcc recipient and on every attachment. Without a verifier the claims stay claims: ask.
+ */
+function verifiedEvidenceGaps(action: ProposedAction, verifier: PolicyEvidenceVerifier | undefined): string[] {
+  const gaps: string[] = [];
+  const templateRef = filled(action.templateId) && filled(action.templateVersion);
+  if (!templateRef) gaps.push('no templateId and templateVersion: templateApproved is a claim, not evidence');
+  if (!filled(action.from?.address)) gaps.push('no sending identity (from)');
+  if (!list(action.to).some((r) => filled(r?.address))) gaps.push('no recipient (to)');
+  if (!verifier) {
+    gaps.push('no evidence verifier: templateApproved, counterpartyInRegister and recipientKnown are claims, not evidence');
+    return gaps;
+  }
+  if (templateRef && !verifier.templateApproved(action.templateId!.trim(), action.templateVersion!.trim())) {
+    gaps.push(`template ${action.templateId} version ${action.templateVersion} is not an approved revision`);
+  }
+  for (const r of [...list(action.to), ...list(action.cc), ...list(action.bcc)]) {
+    if (!filled(r?.address) || !verifier.recipientInRegister(r.address)) gaps.push(`recipient ${filled(r?.address) ? r.address : '(no address)'} is not in the register`);
+  }
+  for (const a of list(action.attachments)) {
+    if (!attachmentGaps(a).length && !verifier.attachmentMatches(a)) gaps.push(`attachment ${a.filename} does not match the document store (document, revision, sha256)`);
+  }
+  return gaps;
+}
+
 /** What an autonomous external message must carry beyond the worker's claims: disclosure, supervisor, a complete manifest. */
 function messageEvidenceGaps(action: ProposedAction): string[] {
   const gaps: string[] = [];
@@ -329,9 +390,16 @@ export function decide(action: ProposedAction, config: PolicyConfig = DEFAULT_PO
   const reasons: string[] = [];
   const rank = LEVEL_RANK[action.level];
 
-  // 1. Internal work: reads always; notes and drafts from L1. An uncertain classification goes to a person.
-  if (!action.external) {
+  // A category that leaves the company by definition is external whatever the worker's flag says.
+  const external = action.external !== false || EXTERNAL_CATEGORIES.includes(action.category);
+
+  // 1. Internal work: reads always; notes and drafts from L1. An uncertain classification and the categories that always
+  //    need a person go to a person, external flag or not.
+  if (!external) {
     if (action.uncertain) return { decision: 'ask', reasons: ['classification is uncertain: a person decides'], disclosureRequired: false };
+    if (config.alwaysAsk.includes(action.category)) {
+      return { decision: 'ask', reasons: [`${action.category} always needs a person, internal or external`], disclosureRequired: false };
+    }
     if (action.category === 'read') return { decision: 'allow', reasons: ['read is always allowed'], disclosureRequired: false };
     if (rank >= 1 && (action.category === 'internal_note' || action.category === 'draft')) {
       return { decision: 'allow', reasons: ['internal work at L1 or above'], disclosureRequired: false };
@@ -345,7 +413,8 @@ export function decide(action: ProposedAction, config: PolicyConfig = DEFAULT_PO
     ...denylistErrors(config),
     ...nameDenials(action, config),
     ...clockDenials(action, config, context.now),
-    ...drawingDenials(action, config),
+    ...drawingDenials(action, config, context.verifier),
+    ...senderDenials(action, context.verifier),
   ];
   if (denials.length) return { decision: 'deny', reasons: denials, disclosureRequired: true };
 
@@ -355,6 +424,7 @@ export function decide(action: ProposedAction, config: PolicyConfig = DEFAULT_PO
   if (action.statesOurPrice) reasons.push('message states our price');
   if (action.counterpartyInRegister === false) reasons.push('counterparty not in the register');
   if (action.recipientKnown === false) reasons.push('recipient unknown');
+  if (action.templateApproved === false) reasons.push('template not approved by a person');
   if (reasons.length) return { decision: 'ask', reasons, disclosureRequired: true };
 
   // 4. Level gates for external action.
@@ -363,12 +433,14 @@ export function decide(action: ProposedAction, config: PolicyConfig = DEFAULT_PO
     if (!config.l2Autonomous.includes(action.category)) {
       return { decision: 'ask', reasons: [`${action.category} is outside the L2 autonomous scope`], disclosureRequired: true };
     }
-    if (!action.templateApproved) return { decision: 'ask', reasons: ['template not approved by a person'], disclosureRequired: true };
-    if (!action.counterpartyInRegister) return { decision: 'ask', reasons: ['counterparty register not confirmed'], disclosureRequired: true };
-    if (!action.recipientKnown) return { decision: 'ask', reasons: ['recipient not confirmed in the register'], disclosureRequired: true };
-    const gaps = messageEvidenceGaps(action);
+    // Autonomous only on verified evidence: the worker's true claims grant nothing by themselves.
+    const gaps = [...messageEvidenceGaps(action), ...verifiedEvidenceGaps(action, context.verifier)];
     if (gaps.length) return { decision: 'ask', reasons: gaps, disclosureRequired: true };
-    return { decision: 'allow', reasons: ['L2: approved template, registered counterparty and recipient, disclosure rendered, named supervisor'], disclosureRequired: true };
+    return {
+      decision: 'allow',
+      reasons: ['L2: verified template revision, registered recipients, authorized sender, matching attachments; disclosure rendered; named supervisor'],
+      disclosureRequired: true,
+    };
   }
   // L3: free external action is not granted before day 180 and never without an owner rule change (MS-D04).
   return { decision: 'ask', reasons: ['L3 external autonomy is not enabled by the owner'], disclosureRequired: true };

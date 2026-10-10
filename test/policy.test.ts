@@ -5,7 +5,7 @@ import { CHECKS, CONFIG, DRAWING, EVIDENCED, TRUSTED, bratislava } from './polic
 
 /** A message in an approved template to a registered counterparty and recipient, with its evidence. localTime is only a claim. */
 const base = { ...EVIDENCED, localTime: '10:00' };
-/** What the server passes: its own trusted clock reading at 10:00 local. */
+/** What the server passes: its own trusted clock reading at 10:00 local and the evidence verifier. */
 const day = TRUSTED;
 
 test('reads are always allowed, even at L0 and internal', () => {
@@ -50,7 +50,7 @@ test('template not approved by a person asks', () => {
 });
 
 test('external sending in quiet hours is denied', () => {
-  const at = (hhmm: string) => decide({ ...base, category: 'supplier_inquiry', level: 'L2' }, CONFIG, { now: bratislava(hhmm, '2026-10-08') }).decision;
+  const at = (hhmm: string) => decide({ ...base, category: 'supplier_inquiry', level: 'L2' }, CONFIG, { ...day, now: bratislava(hhmm, '2026-10-08') }).decision;
   assert.equal(at('00:30'), 'deny');
   assert.equal(at('05:59'), 'deny');
   assert.equal(at('06:00'), 'allow');

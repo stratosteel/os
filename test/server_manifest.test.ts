@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createServer } from '../src/server.js';
 import { parseManifest, gateOrderErrors } from '../src/manifest.js';
 import type { ToolDef } from '../src/tools.js';
-import { CONFIG, EVIDENCED, bratislava } from './policy_fixtures.js';
+import { CONFIG, EVIDENCED, VERIFIER, bratislava } from './policy_fixtures.js';
 
 function tool(tools: ToolDef[], name: string): ToolDef {
   const t = tools.find((x) => x.name === name);
@@ -25,7 +25,7 @@ test('agent role mounts every tool except approval_decide; human role mounts it'
 
 test('worked flow over mock providers: inquiry mail -> job -> files -> policy -> approval -> human decision -> ledger', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'os-flow-'));
-  const w = await createServer({ stateDir: dir, role: 'agent', caller: 'worker-1', policy: CONFIG, clock: () => bratislava('09:15') });
+  const w = await createServer({ stateDir: dir, role: 'agent', caller: 'worker-1', policy: CONFIG, clock: () => bratislava('09:15'), verifier: VERIFIER });
   const mails = (await tool(w.tools, 'search_mail').handler({ query: 'hall EXC2', mailbox: 'rfq@' })) as { jobId?: string }[];
   assert.equal(mails.length, 1);
   const job = (await tool(w.tools, 'get_job').handler({ id: mails[0].jobId })) as { sourcingPlan: { status: string }[]; children: unknown[] };

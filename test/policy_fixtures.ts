@@ -1,7 +1,7 @@
 /**
  * Shared fixtures for the policy tests. Invented names, example.com addresses and made-up hashes only.
  */
-import { DEFAULT_POLICY, type AttachmentEvidence, type DrawingCheckEvidence, type PolicyConfig, type PolicyContext, type ProposedAction } from '../src/policy.js';
+import { DEFAULT_POLICY, type AttachmentEvidence, type DrawingCheckEvidence, type PolicyConfig, type PolicyContext, type PolicyEvidenceVerifier, type ProposedAction } from '../src/policy.js';
 
 /** A configured instance policy: the template defaults plus a denylist of invented names. */
 export const CONFIG: PolicyConfig = { ...DEFAULT_POLICY, confidentialNames: ['Partner Alpha Works', 'Beta Foundry'] };
@@ -15,9 +15,6 @@ export function bratislava(hhmm: string, date = '2026-10-07'): Date {
   return new Date(`${date}T${hhmm}:00+02:00`);
 }
 
-/** What the server passes to the policy: its own clock reading at 10:00 local. */
-export const TRUSTED: PolicyContext = { now: bratislava('10:00') };
-
 /** A drawing exactly as it leaves: stored document, immutable revision and the hash of its bytes. */
 export const DRAWING: AttachmentEvidence = { documentId: 'doc-0001', revision: '3', sha256: '9b1f'.repeat(16), filename: 'hall_40x18_rev3.pdf', kind: 'drawing' };
 
@@ -30,6 +27,42 @@ export const CHECKS: DrawingCheckEvidence[] = [
   { documentId: 'doc-0001', revision: '3', check: 'graphics-scan', by: 'scan-agent-2', at: '2026-10-07T07:12:00Z' },
   { documentId: 'doc-0001', revision: '3', check: 'title-block-review', by: 'M. Example', at: '2026-10-07T07:30:00Z' },
 ];
+
+/** Trusted records of an invented instance, loaded by the caller before it asks the policy. */
+export interface TrustedRecords {
+  /** Approved template revisions as 'id@version'. */
+  templates: string[];
+  /** Registered recipient addresses of counterparties in the register. */
+  recipients: string[];
+  /** Worker service identities allowed to send. */
+  senders: string[];
+  /** The document store: exact revisions, hashes, file names and kinds. */
+  documents: AttachmentEvidence[];
+  /** Drawing checks on record. */
+  checks: DrawingCheckEvidence[];
+}
+
+/** A pure, synchronous verifier over records already in memory, as the policy expects it. */
+export function verifierOver(r: TrustedRecords): PolicyEvidenceVerifier {
+  return {
+    templateApproved: (id, version) => r.templates.includes(`${id}@${version}`),
+    recipientInRegister: (address) => r.recipients.includes(address.trim().toLowerCase()),
+    senderAuthorized: (address) => r.senders.includes(address.trim().toLowerCase()),
+    attachmentMatches: (a) => r.documents.some((d) => d.documentId === a.documentId && d.revision === a.revision && d.sha256 === a.sha256 && d.filename === a.filename && d.kind === a.kind),
+    drawingCheckRecorded: (c) => r.checks.some((k) => k.documentId === c.documentId && k.revision === c.revision && k.check === c.check && k.by === c.by && k.at === c.at),
+  };
+}
+
+export const VERIFIER = verifierOver({
+  templates: ['tpl-rfq-supplier@3'],
+  recipients: ['offers@example.com', 'cc@example.com', 'archive@example.com'],
+  senders: ['rfq-worker@example.com'],
+  documents: [DRAWING, SPEC],
+  checks: CHECKS,
+});
+
+/** What the server passes to the policy: its own clock reading at 10:00 local and the instance's evidence verifier. */
+export const TRUSTED: PolicyContext = { now: bratislava('10:00'), verifier: VERIFIER };
 
 /** An L2 supplier inquiry carrying every piece of evidence the autonomous path asks for. */
 export const EVIDENCED: ProposedAction = {
