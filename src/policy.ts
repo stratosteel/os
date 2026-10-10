@@ -128,6 +128,20 @@ export interface PolicyConfig {
   alwaysAsk: ActionCategory[];
   /** Categories a worker may do alone at L2 inside approved templates and the register. */
   l2Autonomous: ActionCategory[];
+  /**
+   * The approved, versioned disclosure line every autonomous external message must carry in its rendered body. The
+   * template ships it unset (the lawyer confirms the wording): without it no L2 action is allowed.
+   */
+  disclosure?: DisclosureConfig;
+}
+
+/** The disclosure wording an instance has approved, with its version. */
+export interface DisclosureConfig {
+  /** Version of the approved wording, for example 'disclosure-en-v1'. */
+  version: string;
+  /** The approved line. {name} placeholders are filled from `values`; {supervisor} from the action's named supervisor. */
+  line: string;
+  values?: Record<string, string>;
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
@@ -144,8 +158,13 @@ export const DEFAULT_POLICY: PolicyConfig = {
 export interface PolicyResult {
   decision: Decision;
   reasons: string[];
-  /** Every autonomous external message must disclose that it was produced by an AI system (Art. 50 AI Act). */
+  /**
+   * Every autonomous external message must disclose that it was produced by an AI system (Art. 50 AI Act). On an L2
+   * allow the requirement is satisfied only by the rendered body carrying the configured line (see disclosureVersion).
+   */
   disclosureRequired: boolean;
+  /** Version of the disclosure line found in the rendered body, on an L2 allow. */
+  disclosureVersion?: string;
 }
 
 /**
@@ -374,10 +393,36 @@ function verifiedEvidenceGaps(action: ProposedAction, verifier: PolicyEvidenceVe
   return gaps;
 }
 
+/**
+ * The configured disclosure line for this message: placeholders filled from the configuration and the named supervisor.
+ * Fails when the configuration is absent or incomplete, or a placeholder stays unfilled.
+ */
+export function renderDisclosure(disclosure: DisclosureConfig | undefined, supervisor: string | undefined): { ok: true; line: string; version: string } | { ok: false; reason: string } {
+  if (!disclosure || !filled(disclosure.version) || !filled(disclosure.line)) {
+    return { ok: false, reason: 'disclosure configuration is absent: no approved, versioned disclosure line to verify the rendered body against' };
+  }
+  const values: Record<string, string> = { ...(disclosure.values ?? {}) };
+  if (filled(supervisor)) values.supervisor = supervisor.trim();
+  const line = disclosure.line.replace(/\{([A-Za-z]+)\}/g, (whole, name: string) => (filled(values[name]) ? values[name].trim() : whole));
+  const missing = line.match(/\{[A-Za-z]+\}/g);
+  if (missing) return { ok: false, reason: `disclosure ${disclosure.version} cannot be rendered: ${missing.join(', ')} has no value` };
+  return { ok: true, line, version: disclosure.version.trim() };
+}
+
+const collapse = (value: string) => value.replace(/\s+/g, ' ').trim();
+
+/** The rendered body carries the line (whitespace and line breaks are not significant). */
+export function carriesDisclosure(body: string | undefined, line: string): boolean {
+  return typeof body === 'string' && collapse(line).length > 0 && collapse(body).includes(collapse(line));
+}
+
 /** What an autonomous external message must carry beyond the worker's claims: disclosure, supervisor, a complete manifest. */
-function messageEvidenceGaps(action: ProposedAction): string[] {
+function messageEvidenceGaps(action: ProposedAction, config: PolicyConfig): string[] {
   const gaps: string[] = [];
   if (action.disclosureRendered !== true) gaps.push('disclosure line is not rendered in the outgoing message');
+  const disclosure = renderDisclosure(config.disclosure, action.supervisor);
+  if (!disclosure.ok) gaps.push(disclosure.reason);
+  else if (!carriesDisclosure(action.text, disclosure.line)) gaps.push(`the rendered body does not carry the approved disclosure line (version ${disclosure.version})`);
   if (!filled(action.supervisor)) gaps.push('no named supervisor for an autonomous message');
   list(action.attachments).forEach((a, i) => {
     const missing = attachmentGaps(a);
@@ -434,12 +479,14 @@ export function decide(action: ProposedAction, config: PolicyConfig = DEFAULT_PO
       return { decision: 'ask', reasons: [`${action.category} is outside the L2 autonomous scope`], disclosureRequired: true };
     }
     // Autonomous only on verified evidence: the worker's true claims grant nothing by themselves.
-    const gaps = [...messageEvidenceGaps(action), ...verifiedEvidenceGaps(action, context.verifier)];
+    const gaps = [...messageEvidenceGaps(action, config), ...verifiedEvidenceGaps(action, context.verifier)];
     if (gaps.length) return { decision: 'ask', reasons: gaps, disclosureRequired: true };
+    const disclosure = renderDisclosure(config.disclosure, action.supervisor);
     return {
       decision: 'allow',
-      reasons: ['L2: verified template revision, registered recipients, authorized sender, matching attachments; disclosure rendered; named supervisor'],
+      reasons: ['L2: verified template revision, registered recipients, authorized sender, matching attachments; disclosure line found in the rendered body; named supervisor'],
       disclosureRequired: true,
+      ...(disclosure.ok ? { disclosureVersion: disclosure.version } : {}),
     };
   }
   // L3: free external action is not granted before day 180 and never without an owner rule change (MS-D04).

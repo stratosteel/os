@@ -1,10 +1,17 @@
 /**
  * Shared fixtures for the policy tests. Invented names, example.com addresses and made-up hashes only.
  */
-import { DEFAULT_POLICY, type AttachmentEvidence, type DrawingCheckEvidence, type PolicyConfig, type PolicyContext, type PolicyEvidenceVerifier, type ProposedAction } from '../src/policy.js';
+import { DEFAULT_POLICY, DISCLOSURE_LINE_EN, type AttachmentEvidence, type DrawingCheckEvidence, type PolicyConfig, type PolicyContext, type PolicyEvidenceVerifier, type ProposedAction } from '../src/policy.js';
 
-/** A configured instance policy: the template defaults plus a denylist of invented names. */
-export const CONFIG: PolicyConfig = { ...DEFAULT_POLICY, confidentialNames: ['Partner Alpha Works', 'Beta Foundry'] };
+/**
+ * A configured instance policy: the template defaults plus a denylist of invented names and the approved, versioned
+ * disclosure line of an invented company (the evidenced message below renders exactly this line).
+ */
+export const CONFIG: PolicyConfig = {
+  ...DEFAULT_POLICY,
+  confidentialNames: ['Partner Alpha Works', 'Beta Foundry'],
+  disclosure: { version: 'disclosure-en-v1', line: DISCLOSURE_LINE_EN, values: { company: 'Template Company', contact: 'rfq@example.com' } },
+};
 
 /**
  * A trusted clock reading given as Europe/Bratislava wall time. Summer-time dates only (UTC+2, 2026-03-29 to 2026-10-24);
