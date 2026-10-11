@@ -65,11 +65,22 @@ export interface MemoryProvider {
   readStatePage(): Promise<string>;
 }
 
+/**
+ * Verb gateway of a records system that exposes more than jobs (FABRIX): read verbs by name,
+ * write verbs by name with an idempotency key. The tools in fabrix_tools.ts are built over it.
+ */
+export interface FabrixGateway {
+  read(verb: string, params?: Record<string, string | number | undefined>): Promise<unknown>;
+  write(verb: string, input: Record<string, unknown>, idempotencyKey?: string): Promise<unknown>;
+}
+
 export interface Providers {
   mail: MailProvider;
   files: FilesProvider;
   records: RecordsProvider;
   memory: MemoryProvider;
+  /** present when layer 2 is FABRIX; the FABRIX tools are mounted only then */
+  fabrix?: FabrixGateway;
 }
 
 /** Provider names as they appear in layers.yaml. */

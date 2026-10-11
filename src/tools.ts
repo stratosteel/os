@@ -8,6 +8,7 @@ import * as z from 'zod/v4';
 import type { Providers } from './providers.js';
 import { ApprovalQueue } from './approvals.js';
 import { decide, DEFAULT_POLICY, type PolicyConfig, type ProposedAction } from './policy.js';
+import { fabrixTools } from './fabrix_tools.js';
 
 export interface ToolDef<S extends z.ZodObject = z.ZodObject> {
   name: string;
@@ -116,5 +117,7 @@ export function buildTools(ctx: ToolContext): ToolDef[] {
       handler: (i) => ctx.approvals.decide(i.id, i.decision, ctx.caller, i.note),
     }),
   ];
+  // layer 2 is FABRIX: its verbs are mounted too, still behind the same policy_check and approvals
+  if (ctx.providers.fabrix) tools.push(...fabrixTools(ctx.providers.fabrix, defineTool));
   return tools.filter((t) => !t.humanOnly || ctx.role === 'human');
 }
